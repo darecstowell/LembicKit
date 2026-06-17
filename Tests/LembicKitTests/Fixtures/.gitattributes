@@ -1,0 +1,4 @@
+# Golden oracle fixtures are byte-anchored: the tests compare them with exact
+# `==`. Mark them binary-ish (`-text`) so git never normalizes line endings
+# (CRLF↔LF) or applies whitespace filters that would silently break the bytes.
+* -text

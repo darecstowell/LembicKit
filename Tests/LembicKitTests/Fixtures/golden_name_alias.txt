@@ -1,0 +1,12 @@
+# iMessage transcript
+# 2023-11-14 → 2023-11-14 · 3 messages · 0 reactions · 0 with attachments
+# Speakers: Person 1 (P1), Person 2 (P2), Person 3 (P3) — names anonymized.
+# Reactions shown as [PN: ❤️] after the message they target.
+# Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
+# Times are local, 24h. Section headers are calendar days.
+
+
+## 2023-11-14 (Tue)
+16:13 P1: tell P2 I said hi
+16:14 P2: P3 and P2 are both coming, not Carla
+16:15 P3: thanks Me, P2 already told me

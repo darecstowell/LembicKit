@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build, test, lint
+    # macos-15 ships the Swift 6 toolchain this package needs (swift-tools 6.0).
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Lint (swift-format)
+        run: swift format lint --strict --recursive Sources
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Smoke-test the CLI against the example fixture
+        run: swift run lembic-cli conversations Examples/chat.db

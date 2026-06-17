@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.textstoai.lembic-cli</string>
+	<key>CFBundleName</key>
+	<string>lembic-cli</string>
+	<key>NSContactsUsageDescription</key>
+	<string>lembic-cli matches the phone numbers and emails in your message export to names in your address book. Contact data never leaves your Mac.</string>
+</dict>
+</plist>

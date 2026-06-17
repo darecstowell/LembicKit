@@ -1,0 +1,16 @@
+# iMessage transcript
+# 2023-11-14 → 2023-11-15 · 4 messages · 1 reactions · 0 with attachments
+# Speakers: Person 1 (P1), Person 2 (P2) — names anonymized.
+# Reactions shown as [PN: ❤️] after the message they target.
+# Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
+# Times are local, 24h. Section headers are calendar days.
+
+
+## 2023-11-14 (Tue)
+16:13 P2: hey there  [P1: ❤️]
+16:14 P1: all good
+        second line
+16:15 P2: my ssn is 123-45-6789 keep it safe
+
+## 2023-11-15 (Wed)
+17:13 P1: next day

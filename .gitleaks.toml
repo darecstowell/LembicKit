@@ -1,0 +1,26 @@
+title = "LembicKit gitleaks config"
+
+# LembicKit is an on-device secret detector. Its test fixtures and detector
+# source files contain secret-shaped strings on purpose: planted fake API keys,
+# sample SSNs, a credit-card test vector, a BIP-39 seed phrase, and the detection
+# regexes themselves. Those are not real credentials. This config keeps the
+# default gitleaks rules but allowlists the files where that is expected, so a
+# scan still catches a genuine leak anywhere else in the tree.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and detector pattern files carry sample/planted secrets by design"
+paths = [
+  # Build output and IDE state, never part of the shipped sources.
+  '''\.build/''',
+  '''\.swiftpm/''',
+  '''Tests/LembicKitTests/Fixtures/''',
+  '''Tests/LembicKitTests/SecretDetectorTests\.swift''',
+  '''Tests/LembicKitTests/SecretScrubberTests\.swift''',
+  '''Tests/LembicKitTests/ExportAPITests\.swift''',
+  '''Sources/LembicKit/SecretDetector\.swift''',
+  '''Sources/LembicKit/SecretScrubber\.swift''',
+  '''Sources/LembicKit/BIP39Wordlist\.swift''',
+]

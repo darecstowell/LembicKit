@@ -1,0 +1,16 @@
+# iMessage transcript with +15551234567
+# 2023-11-14 → 2023-11-15 · 4 messages · 1 reactions · 0 with attachments
+# Speakers: Me = the account owner, Them = +15551234567
+# Reactions shown as [Them: ❤️] after the message they target.
+# Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
+# Times are local, 24h. Section headers are calendar days.
+
+
+## 2023-11-14 (Tue)
+16:13 Them: hey there  [Me: ❤️]
+16:14 Me: all good
+        second line
+16:15 Them: my ssn is 123-45-6789 keep it safe
+
+## 2023-11-15 (Wed)
+17:13 Me: next day

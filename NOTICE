@@ -1,0 +1,27 @@
+LembicKit
+Copyright (c) 2026 Darec Stowell
+
+The LembicKit library and the lembic-cli tool are licensed under the MIT License
+(see LICENSE). This product includes third-party software, listed below with
+its license.
+
+Madrid (TypedStream)
+  https://github.com/mattt/Madrid
+  MIT License.
+  Used by the LembicKit library to decode the Messages attributedBody typedstream.
+
+GRDB.swift
+  https://github.com/groue/GRDB.swift
+  MIT License.
+  Used by the LembicKit library for read-only SQLite access.
+
+swift-argument-parser
+  https://github.com/apple/swift-argument-parser
+  Apache License 2.0.
+  Used only by the lembic-cli executable target, not by the LembicKit library.
+
+BIP-39 English wordlist
+  https://github.com/bitcoin/bips (bip-0039/english.txt)
+  MIT License.
+  Embedded verbatim in Sources/LembicKit/BIP39Wordlist.swift, used to validate
+  cryptocurrency seed-phrase checksums during secret detection.
