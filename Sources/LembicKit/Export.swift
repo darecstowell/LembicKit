@@ -10,11 +10,11 @@ import Foundation
 /// caller and any OSS consumer get the same behavior.
 ///
 /// A **class**, not a struct: it owns a reference-typed, session-lived
-/// `ChatDatabase` and a lazily-built handle-label cache. A caller copies the DB
-/// once and reuses it for the conversation list AND every render (the
-/// copy-once, reuse path); `Export` is the natural home for that handle. `@unchecked
-/// Sendable` for the same reason `ChatDatabase` is — it only wraps thread-safe
-/// read state — so it can cross into `Task.detached`.
+/// `ChatDatabase` and a lazily-built handle-label cache. A caller opens the DB
+/// once (in place, read-only) and reuses it for the conversation list AND every
+/// render (the open-once, reuse path); `Export` is the natural home for that
+/// handle. `@unchecked Sendable` for the same reason `ChatDatabase` is — it only
+/// wraps thread-safe read state — so it can cross into `Task.detached`.
 public final class Export: @unchecked Sendable {
     /// The open, preflighted database. Exposed so a caller that ALSO wants the
     /// conversation list can pass it to `Conversations.list(from:)` without
@@ -27,7 +27,7 @@ public final class Export: @unchecked Sendable {
     /// labels are the same for the whole db).
     private var cachedLabels: [Bool: [Int64: String]] = [:]
 
-    /// Wrap an already-open `ChatDatabase` (the long-lived caller path: it copies
+    /// Wrap an already-open `ChatDatabase` (the long-lived caller path: it opens
     /// once, lists, and renders against the same instance). Does NOT preflight; assumes the
     /// caller already did, matching how `Conversations.list(from:)` expects a
     /// preflighted db. The wrapper does NOT own the db lifecycle (`close()` /
@@ -37,18 +37,18 @@ public final class Export: @unchecked Sendable {
         self.database = database
     }
 
-    /// One-shot path (CLI / scripts): copy + preflight + own the db. The copy is
-    /// released on `close()` / `deinit`. Throws `UnsupportedSchemaError` from
-    /// preflight (fail-closed) — this is the schema guard the CLI skipped before
-    /// it routed through `Export`.
+    /// One-shot path (CLI / scripts): open in place + preflight + own the db. The
+    /// connection is closed on `close()` / `deinit` (nothing to delete — the DB is
+    /// never copied). Throws `UnsupportedSchemaError` from preflight (fail-closed)
+    /// — this is the schema guard the CLI skipped before it routed through `Export`.
     public convenience init(chatDBAt url: URL) throws {
-        let db = try ChatDatabase(copying: url)
+        let db = try ChatDatabase(at: url)
         try db.preflight()  // step 2 — the guard the CLI skips today
         self.init(database: db)
         self.ownsDatabase = true
     }
 
-    /// Release the copied db (only meaningful for the `chatDBAt:` path; a no-op
+    /// Close the db connection (only meaningful for the `chatDBAt:` path; a no-op
     /// when the caller owns the db lifecycle). Idempotent.
     public func close() {
         if ownsDatabase { database.cleanUp() }
@@ -212,14 +212,14 @@ extension Export {
     ) throws -> Rendered {
         let labels = try resolvedLabels(resolveContacts: resolveContacts)
         let extractor = Extractor.forConversation(conversation, globalLabels: labels)
-        let records = try database.queue.read { db in
+        let records = try database.read { db in
             try extractor.extractConversation(db, chatIDs: conversation.chatIDs)
         }
         // System events are opt-in (off by default) and group-only; extract them
         // only when both hold, so the default path never reads the extra columns.
         let systemEvents: [Transcript.SystemEvent]
         if scope.showSystemEvents, conversation.isGroup {
-            systemEvents = try database.queue.read { db in
+            systemEvents = try database.read { db in
                 try extractor.extractSystemEvents(db, chatIDs: conversation.chatIDs)
             }
         } else {

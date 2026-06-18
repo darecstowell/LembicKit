@@ -28,7 +28,7 @@ LembicKit does one job instead. It reads the same local `chat.db` and writes a c
 
 ## It runs on your Mac, and you can read every line
 
-Privacy is why this is built the way it is. LembicKit copies your `chat.db` to a temporary file, opens that copy read-only, and writes plain text. The library has no network code. You can audit the SQL it runs, how it decodes message bodies, and how it detects secrets, because all of it is here and covered by tests.
+Privacy is why this is built the way it is. LembicKit opens your `chat.db` in place, read-only. It never copies the file and never writes to it, and it writes plain text out. The library has no network code. You can audit the SQL it runs, how it decodes message bodies, and how it detects secrets, because all of it is here and covered by tests.
 
 ## What this is, and what it is not
 

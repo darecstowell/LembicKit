@@ -1,0 +1,27 @@
+# Dependabot version updates.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Swift Package Manager deps in Package.swift (Madrid, GRDB.swift, ArgumentParser).
+  - package-ecosystem: "swift"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      swift-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions pinned in .github/workflows (e.g. actions/checkout).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        update-types:
+          - "minor"
+          - "patch"

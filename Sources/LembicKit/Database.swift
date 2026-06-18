@@ -1,57 +1,119 @@
 import Foundation
 import GRDB
 
-/// Read-only access to a chat.db that has been copied to a private temp
-/// directory first. Copying (including `-wal`/`-shm` sidecars) means we never
-/// hold even a read lock on the live Messages store.
+/// Read-only access to the live `chat.db`, opened **in place**: never copied,
+/// never written, only read. The connection is `readonly = true`, so the engine
+/// holds no write lock on the Messages store and Apple's WAL keeps writers
+/// (Messages.app) and our reader from blocking each other. Each read sees the
+/// live WAL — current data, including frames Messages just wrote and hasn't
+/// checkpointed — so the export reflects what's on screen.
+///
+/// **Best-effort live contract:** every read is internally consistent (a read
+/// transaction is a point-in-time snapshot), and a transient torn read while
+/// Messages writes is absorbed by a bounded retry (`read(_:)` / `withRetry`).
 ///
 /// `@unchecked Sendable`: after `init` the only mutable state is `connection`,
 /// which is set once and then read-only until `cleanUp()`/`deinit` nils it; the
 /// underlying GRDB `DatabaseQueue` is itself thread-safe for concurrent reads.
-/// This lets the caller copy the DB *once* and reuse the instance across the
-/// conversation list and every transcript extraction (copy once, reuse), and
+/// This lets the caller open the DB *once* and reuse the instance across the
+/// conversation list and every transcript extraction (open once, reuse), and
 /// pass it between the main actor and `Task.detached` readers.
 public final class ChatDatabase: @unchecked Sendable {
     private var connection: DatabaseQueue?
-    /// Read-only queue over the temp copy. Valid until `cleanUp()`.
+    /// Read-only queue over the live `chat.db`. Valid until `cleanUp()`.
     public var queue: DatabaseQueue { connection! }
-    public let tempDirectory: URL
 
-    public init(copying source: URL) throws {
-        let fm = FileManager.default
-        let tmp = fm.temporaryDirectory
-            .appendingPathComponent("lembic-\(UUID().uuidString)", isDirectory: true)
-        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
-
-        let dest = tmp.appendingPathComponent(source.lastPathComponent)
-        try fm.copyItem(at: source, to: dest)
-        for suffix in ["-wal", "-shm"] {
-            let sidecar = URL(fileURLWithPath: source.path + suffix)
-            if fm.fileExists(atPath: sidecar.path) {
-                try fm.copyItem(at: sidecar, to: URL(fileURLWithPath: dest.path + suffix))
-            }
-        }
-
+    /// Open `url` directly, read-only, in place — no copy, no sidecar copy, no
+    /// temp dir. The read-only connection reads the live WAL and writes nothing.
+    public init(at url: URL) throws {
         var config = Configuration()
         config.readonly = true
-        self.connection = try DatabaseQueue(path: dest.path, configuration: config)
-        self.tempDirectory = tmp
+        self.connection = try DatabaseQueue(path: url.path, configuration: config)
     }
 
-    /// Close the SQLite connection *before* deleting the temp copy. Removing the
-    /// files while GRDB still holds them open trips SQLite's "vnode unlinked
-    /// while in use" guard (harmless after a completed read, but noisy in logs),
-    /// so drop the connection first. Idempotent; also runs from `deinit`.
+    /// Close the SQLite connection. Nothing to delete — the DB was opened in
+    /// place, never copied — so this just drops the read-only connection.
+    /// Idempotent; also runs from `deinit`.
     public func cleanUp() {
         connection = nil
-        try? FileManager.default.removeItem(at: tempDirectory)
     }
 
     deinit { cleanUp() }
 
+    /// Bounded retry over a read transaction. A torn read while Messages writes
+    /// can surface as a transient SQLite error; a fresh read transaction usually
+    /// succeeds. This is the read entry point every engine query routes through,
+    /// so the best-effort-live contract holds for the whole surface.
+    public func read<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
+        try Self.withRetry { try queue.read(block) }
+    }
+
+    /// Run `op` up to `attempts` times, sleeping `backoff` between tries, but only
+    /// retrying on a *transient* SQLite error (`isTransient`); any other error
+    /// rethrows immediately. Factored out so the retry policy is unit-testable
+    /// without a live, contended database.
+    static func withRetry<T>(
+        attempts: Int = 3, backoff: TimeInterval = 0.15,
+        _ op: () throws -> T
+    ) throws -> T {
+        var lastError: Error?
+        for attempt in 0..<attempts {
+            do { return try op() } catch {
+                guard isTransient(error) else { throw error }
+                lastError = error
+                if attempt < attempts - 1 { Thread.sleep(forTimeInterval: backoff) }
+            }
+        }
+        throw lastError!
+    }
+
+    /// Whether `error` is a transient SQLite error worth retrying — a torn read
+    /// against the live WAL while Messages is mid-write can momentarily surface as
+    /// busy/locked/I-O/corrupt/not-a-DB; a fresh read transaction usually clears
+    /// it. A non-`DatabaseError` (or a genuine logic error like `.SQLITE_ERROR`)
+    /// is not retried.
+    static func isTransient(_ error: Error) -> Bool {
+        guard let e = error as? DatabaseError else { return false }
+        switch e.resultCode {
+        case .SQLITE_BUSY, .SQLITE_LOCKED, .SQLITE_IOERR, .SQLITE_CORRUPT, .SQLITE_NOTADB:
+            return true
+        default: return false
+        }
+    }
+
+    /// MAX(ROWID) over `message` — a single b-tree seek, O(1) even on a huge DB.
+    /// The app polls this to detect new activity without re-running the list query.
+    public func messageWatermark() throws -> Int64 {
+        try read { try Int64.fetchOne($0, sql: "SELECT MAX(ROWID) FROM message") ?? 0 }
+    }
+
+    /// The oldest and newest real message timestamps in `message`, as Dates, or
+    /// nils when the table is empty. Used to detect an incomplete (sparse) local
+    /// store — a Mac whose Messages-in-iCloud history hasn't synced has a recent
+    /// "oldest" floor. Filters out the date==0 sentinel rows so the floor is real.
+    public func messageDateBounds() throws -> (oldest: Date?, newest: Date?) {
+        try read { db in
+            // One b-tree pass for the min/max of the real (date > 0) rows; the
+            // `date == 0` sentinel rows are excluded so the floor is a real message.
+            guard
+                let row = try Row.fetchOne(
+                    db, sql: "SELECT MIN(date) lo, MAX(date) hi FROM message WHERE date > 0")
+            else { return (nil, nil) }
+            // Both are NULL together (no qualifying rows) or both present.
+            let lo: Int64? = row["lo"]
+            let hi: Int64? = row["hi"]
+            func date(_ ns: Int64?) -> Date? {
+                ns.map {
+                    Date(timeIntervalSince1970: Double($0) / 1e9 + Extractor.appleEpochOffset)
+                }
+            }
+            return (date(lo), date(hi))
+        }
+    }
+
     /// Handle ROWID → raw identifier (phone/email), e.g. 3 → "+15551234567".
     public func handleLabels() throws -> [Int64: String] {
-        try queue.read { db in
+        try read { db in
             var map: [Int64: String] = [:]
             let rows = try Row.fetchCursor(db, sql: "SELECT ROWID, id FROM handle")
             while let row = try rows.next() {
@@ -84,7 +146,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// chat rows); this gathers them all so an export drops none.
     public func oneToOneChats(forHandles handles: Set<Int64>) throws -> [ChatInfo] {
         guard !handles.isEmpty else { return [] }
-        return try queue.read { db in
+        return try read { db in
             let placeholders = Array(repeating: "?", count: handles.count).joined(separator: ",")
             let rows = try Row.fetchAll(
                 db,
@@ -110,7 +172,7 @@ public final class ChatDatabase: @unchecked Sendable {
     }
 
     public func counts() throws -> Counts {
-        try queue.read { db in
+        try read { db in
             Counts(
                 messages: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message") ?? 0,
                 handles: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM handle") ?? 0,
@@ -149,7 +211,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// Contact grouping + multi-identifier union happen in the caller (they need the
     /// runtime Contacts map).
     public func conversationSummaries() throws -> [ConversationSummary] {
-        try queue.read { db in
+        try read { db in
             let rows = try Row.fetchAll(
                 db,
                 sql: """
@@ -219,7 +281,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// label resolution happen in `Conversations.group` (they need the runtime
     /// Contacts map), keeping this a pure read like its 1:1 twin.
     public func groupConversationSummaries() throws -> [GroupConversationSummary] {
-        try queue.read { db in
+        try read { db in
             // Rosters keyed by chat_id (one chat → many handles). A separate read
             // from the count/date aggregate below so the GROUP BY on the message
             // join doesn't fan out per participant.
@@ -284,7 +346,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// talk. A silent member (0 real messages) simply has no row here and falls to
     /// the end of the order via the stable alphabetical tiebreak.
     public func groupParticipantMessageCounts() throws -> [Int64: [Int64: Int]] {
-        try queue.read { db in
+        try read { db in
             var counts: [Int64: [Int64: Int]] = [:]
             let rows = try Row.fetchAll(
                 db,
@@ -340,7 +402,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// no 1:1 chats yet), so neither is reported here — those are separate app
     /// states.
     public func schemaProblems() throws -> [SchemaProblem] {
-        try queue.read { db in
+        try read { db in
             var problems: [SchemaProblem] = []
             for (table, columns) in Self.requiredSchema {
                 // `table` is a compile-time constant from `requiredSchema`, never
@@ -377,7 +439,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// gracefully (the toggle yields nothing) rather than throwing at
     /// statement-prepare time. A missing table yields an empty result set ⇒ false.
     public func hasColumns(_ columns: [String], inTable table: String) throws -> Bool {
-        try queue.read { try Self.hasColumns(columns, inTable: table, db: $0) }
+        try read { try Self.hasColumns(columns, inTable: table, db: $0) }
     }
 
     /// The `PRAGMA table_info` column probe, on an already-open `GRDB.Database` —

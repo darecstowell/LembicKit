@@ -135,9 +135,9 @@ public enum GroupStitch: Sendable {
 /// The engine's entry point for going from a `chat.db` to people-level
 /// `Conversation`s. Mirrors `ContactsMap`'s enum-of-statics shape. Two layers so
 /// the pure grouping (`group`) is unit-testable without a real DB, while
-/// `list(from:)` / `list(copying:)` wire it to one.
+/// `list(from:)` / `list(at:)` wire it to one.
 public enum Conversations {
-    /// Open the conversation list from a `ChatDatabase` that's already been copied
+    /// Open the conversation list from a `ChatDatabase` that's already been opened
     /// + preflighted. Resolves Contacts when `resolvingContacts` is true (graceful:
     /// a Contacts denial degrades to bare identifiers, never throws). The returned
     /// list is newest-first.
@@ -205,15 +205,16 @@ public enum Conversations {
         return (oneToOnes + groups).sorted { $0.lastMessageDate > $1.lastMessageDate }
     }
 
-    /// One-shot convenience for a CLI / script: copy + preflight + list, owning
+    /// One-shot convenience for a CLI / script: open + preflight + list, owning
     /// the `ChatDatabase` for the duration and closing it on return. Apps that
     /// reuse the db for extraction should call `list(from:)` with their own
-    /// instance instead (copy once, reuse).
+    /// instance instead (open once, reuse). The DB is opened in place, read-only;
+    /// nothing is copied.
     public static func list(
-        copying source: URL,
+        at url: URL,
         resolvingContacts: Bool = true
     ) throws -> [Conversation] {
-        let db = try ChatDatabase(copying: source)
+        let db = try ChatDatabase(at: url)
         defer { db.cleanUp() }
         try db.preflight()
         return try list(from: db, resolvingContacts: resolvingContacts)

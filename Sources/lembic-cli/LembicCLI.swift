@@ -22,7 +22,7 @@ struct Export: ParsableCommand {
         abstract: "Export an iMessage 1:1 thread from chat.db as compact .txt + .jsonl for LLMs."
     )
 
-    @Argument(help: "Path to chat.db. It is copied to a private temp dir before reading.")
+    @Argument(help: "Path to chat.db. It is opened read-only, in place (never copied).")
     var databasePath: String
 
     @Option(name: .customLong("chat-id"), help: "ROWID of the chat to export.")
@@ -72,8 +72,8 @@ struct Export: ParsableCommand {
             throw ValidationError("--target-handles must contain at least one handle ROWID")
         }
 
-        // Route through the engine seam: this copies, PREFLIGHTS (the schema
-        // guard the old CLI skipped), and owns the temp db for the run.
+        // Route through the engine seam: this opens in place, PREFLIGHTS (the
+        // schema guard the old CLI skipped), and owns the read-only db for the run.
         let exporter = try LembicKit.Export(chatDBAt: URL(fileURLWithPath: databasePath))
         defer { exporter.close() }
         let db = exporter.database
@@ -92,7 +92,7 @@ struct Export: ParsableCommand {
         }
 
         if let sample {
-            let records = try db.queue.read { try extractor.extractChat($0, chatID: chatID) }
+            let records = try db.read { try extractor.extractChat($0, chatID: chatID) }
             for r in records.prefix(sample) {
                 print("\(r.date) \(r.speaker): \(r.text)")
             }
@@ -164,13 +164,13 @@ struct Export: ParsableCommand {
             return
         }
         let ids = Set(chats.map(\.chatID))
-        let records = try db.queue.read { try extractor.extractConversation($0, chatIDs: ids) }
+        let records = try db.read { try extractor.extractConversation($0, chatIDs: ids) }
 
         print("[union] handles \(handles.sorted()) → \(chats.count) one-to-one chat(s):")
         var sumIndividual = 0
         var biggest = (id: Int64(0), count: -1)
         for c in chats {
-            let n = try db.queue.read { try extractor.extractChat($0, chatID: c.chatID).count }
+            let n = try db.read { try extractor.extractChat($0, chatID: c.chatID).count }
             sumIndividual += n
             if n > biggest.count { biggest = (c.chatID, n) }
             print(
@@ -247,7 +247,7 @@ struct ConversationsCommand: ParsableCommand {
         abstract: "List the 1:1 conversations (people) in a chat.db, newest first."
     )
 
-    @Argument(help: "Path to chat.db. It is copied to a private temp dir before reading.")
+    @Argument(help: "Path to chat.db. It is opened read-only, in place (never copied).")
     var databasePath: String
 
     @Flag(
@@ -257,7 +257,7 @@ struct ConversationsCommand: ParsableCommand {
 
     func run() throws {
         let people = try LembicKit.Conversations.list(
-            copying: URL(fileURLWithPath: databasePath), resolvingContacts: contacts)
+            at: URL(fileURLWithPath: databasePath), resolvingContacts: contacts)
 
         guard !people.isEmpty else {
             print("[conversations] no 1:1 (style=45) conversations found")

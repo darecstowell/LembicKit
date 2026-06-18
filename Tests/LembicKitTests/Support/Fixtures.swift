@@ -310,23 +310,23 @@ enum Fixtures {
     }
 
     /// Materialize an in-memory fixture to a temp .db file, then open it as a real
-    /// `ChatDatabase` (which copies it again into its own temp dir). Lets DB-backed
-    /// tests exercise the *instance* query methods — the surface kept when the
-    /// static twins were folded. The returned `ChatDatabase` cleans itself up on
-    /// deinit; the helper deletes its own scratch dir.
+    /// `ChatDatabase` (read-only, in place). Lets DB-backed tests exercise the
+    /// *instance* query methods — the surface kept when the static twins were
+    /// folded. The returned `ChatDatabase` is opened on `path`; the caller keeps
+    /// the temp file alive for the DB's lifetime (these fixtures are tiny and the
+    /// OS reaps the temp dir).
     static func openChatDB(populating sql: String) throws -> ChatDatabase {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("lembic-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let path = dir.appendingPathComponent("chat.db")
         // Write the fixture to an on-disk file, then drop the writer so the file
-        // is flushed before ChatDatabase opens a read-only copy of it.
+        // is flushed before ChatDatabase opens it read-only, in place.
         do {
             let q = try DatabaseQueue(path: path.path)
             try q.write { try $0.execute(sql: sql) }
         }
-        let db = try ChatDatabase(copying: path)  // copies into ITS temp dir, read-only
-        try? FileManager.default.removeItem(at: dir)  // ChatDatabase has its own copy now
+        let db = try ChatDatabase(at: path)  // opens in place, read-only
         return db
     }
 }
