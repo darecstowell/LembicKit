@@ -111,5 +111,3 @@ The code is MIT licensed (see [LICENSE](LICENSE)). The name "Lembic" and the log
 ## Lembic, the app
 
 LembicKit is the engine. [Lembic](https://textstoai.com) is the Mac app built on it: a searchable contact picker, a live token-budget meter so a long thread fits in one chat, curated prompts, and on-device redaction that flags secrets before they leave your Mac. If reading SQLite by hand is not how you want to spend your evening, that is the one to use.
-</content>
-</invoke>
