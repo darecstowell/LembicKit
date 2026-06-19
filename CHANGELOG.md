@@ -8,6 +8,37 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-19
+
+### Security
+
+- Unsent/retracted messages (Undo Send) are no longer exported. Rows with a
+  non-zero `date_retracted` are dropped during extraction, so content the sender
+  explicitly retracted never reaches the `.txt`/`.jsonl` output (#11).
+- Overlapping or nested redaction spans no longer corrupt output or leak source
+  text in `Transcript.redactedText(of:redactions:)`. Spans are now merged into a
+  single covering `[redacted]` through the same splice path the `.txt`/`.jsonl`
+  renderers use, so a span overlapping an already-redacted region can no longer
+  expose source bytes (#8).
+- The opt-in email scrubber regex no longer suffers catastrophic backtracking
+  (ReDoS). The pattern is length-bounded (RFC label/address limits) and atomic,
+  so a pathological hyphen-run that previously hung the render thread for seconds
+  now completes in milliseconds (#7).
+- The password and standing-code detectors no longer fire on ordinary prose
+  (e.g. `password please`, `error code 500`, `area code 415`), holding the
+  no-alert-fatigue floor. A real separator (`is`/`:`/`=`) is now required before
+  a bare value, and `code` is gated by a negative-qualifier list (#5).
+
+### Fixed
+
+- The SSN detector no longer flags space-grouped 3-2-4 digit runs (e.g.
+  `scores 123 45 6789 ok`) without a nearby `ssn`/`social security` keyword. The
+  dashed form remains keyword-free (#6).
+- `normalizePhone` no longer assumes US numbers. It accepts a configurable
+  default region (ISO country code, defaulting to US), treats a leading `+` as
+  authoritative, and strips a single national trunk `0`, so non-US contact names
+  resolve and the phone+email identifier union holds for non-US contacts (#9).
+
 ## [0.3.0] - 2026-06-19
 
 ### Changed
@@ -69,7 +100,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 - A schema-sanity guard that fails closed on an unsupported `chat.db` rather than
   producing a quietly wrong export.
 
-[Unreleased]: https://github.com/darecstowell/LembicKit/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/darecstowell/LembicKit/compare/0.3.1...HEAD
+[0.3.1]: https://github.com/darecstowell/LembicKit/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/darecstowell/LembicKit/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/darecstowell/LembicKit/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/darecstowell/LembicKit/releases/tag/0.1.0
