@@ -52,6 +52,39 @@ struct ExportAPITests {
             "a nil guid is unredactable → text unchanged, not nil")
     }
 
+    // Overlapping / nested spans must collapse to ONE clean token without leaking
+    // any source byte between them (issue #8). Both input orderings are covered
+    // because the merge sorts first, so order must not matter.
+    private func overlappingRedaction(_ a: Range<Int>, _ b: Range<Int>) -> RedactionSet {
+        var rs = RedactionSet()
+        rs.add(Redaction(guid: "g0", range: a))
+        rs.add(Redaction(guid: "g0", range: b))
+        return rs
+    }
+
+    @Test func redactedTextMergesOverlappingSpans() {
+        // "secret ABCDEFGH tail": spans [7,12) and [10,15) overlap.
+        let rec = Fixtures.redRec("g0", 0, "Them", "secret ABCDEFGH tail")
+        for (a, b) in [(7..<12, 10..<15), (10..<15, 7..<12)] {
+            let out = Transcript.redactedText(of: rec, redactions: overlappingRedaction(a, b))
+            #expect(out == "secret [redacted] tail", "overlap collapses to one clean token")
+            // The pre-fix bug spliced into an already-spliced token, leaving an
+            // `[redacted]edacted]` artifact — one clean token means no artifact.
+            #expect(out?.components(separatedBy: "[redacted]").count == 2, "exactly one token")
+        }
+    }
+
+    @Test func redactedTextMergesNestedSpans() {
+        // "secret ABCDEFGH tail": [9,12) is nested inside [7,15).
+        let rec = Fixtures.redRec("g0", 0, "Them", "secret ABCDEFGH tail")
+        for (a, b) in [(7..<15, 9..<12), (9..<12, 7..<15)] {
+            let out = Transcript.redactedText(of: rec, redactions: overlappingRedaction(a, b))
+            #expect(out == "secret [redacted] tail", "nested span collapses to one clean token")
+            #expect(!(out?.contains("FGH") ?? true), "source bytes do not leak past the token")
+            #expect(out?.components(separatedBy: "[redacted]").count == 2, "exactly one token")
+        }
+    }
+
     // MARK: - Export.records(_:scope:)
 
     private let recs = [

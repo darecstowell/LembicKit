@@ -245,33 +245,21 @@ public enum Transcript {
     }
 
     /// Apply this message's span redactions to its source `text`, splicing each
-    /// clamped span with the literal `[redacted]`. The single source of truth for
-    /// the redaction substring contract — both `compactText` (the `.txt` path) and
-    /// `jsonLines` (the `.jsonl` path) call this, so the substitution can never
-    /// diverge between the two outputs. Span ranges are UTF-16 offsets into
-    /// `text`; out-of-bounds / empty ranges are filtered. A `nil` guid (or no
+    /// clamped span with the literal `[redacted]`. Routes through the shared
+    /// `bodyReplacements` + `applyReplacements` path (no aliases), so overlapping
+    /// and nested spans are resolved to a non-overlapping set exactly as the
+    /// `.txt`/`.jsonl` paths do — a second span inside an already-spliced
+    /// `[redacted]` can never leak source bytes. Span ranges are UTF-16 offsets
+    /// into `text`; out-of-bounds / empty ranges are filtered. A `nil` guid (or no
     /// span redactions for the guid) returns `text` unchanged.
     static func applySpanRedactions(
         to text: String, guid: String?, redactions: RedactionSet
     ) -> String {
-        guard let guid else { return text }
-        let sourceNS = text as NSString
-        let sourceLen = sourceNS.length
-        let spansForGuid = redactions.redactions(forGuid: guid)
-            .compactMap { $0.range }
-            .filter {
-                $0.lowerBound >= 0 && $0.upperBound <= sourceLen
-                    && $0.lowerBound < $0.upperBound
-            }
-        guard !spansForGuid.isEmpty else { return text }
-        // Splice descending so earlier replacements don't shift later spans.
-        let redactedBody = NSMutableString(string: sourceNS)
-        for sp in spansForGuid.sorted(by: { $0.lowerBound > $1.lowerBound }) {
-            redactedBody.replaceCharacters(
-                in: NSRange(location: sp.lowerBound, length: sp.upperBound - sp.lowerBound),
-                with: "[redacted]")
-        }
-        return redactedBody as String
+        guard guid != nil else { return text }
+        let source = text as NSString
+        let reps = bodyReplacements(
+            source: source, guid: guid, redactions: redactions, aliases: [:])
+        return applyReplacements(to: source, reps)
     }
 
     /// One pending in-body substitution for `compactText`'s body assembly: a
@@ -418,16 +406,28 @@ public enum Transcript {
     ) -> [BodySubstitution] {
         let sourceLen = source.length
 
-        // (a) Redaction span replacements (clamped to text bounds). Only a message
-        // with a guid can be redacted.
+        // (a) Redaction span replacements (clamped to text bounds, then merged so
+        // overlapping/nested/adjacent spans collapse to one covering `[redacted]` —
+        // splicing them independently would leak source bytes between them).
         var redactionReps: [BodySubstitution] = []
         if let guid {
-            for sp in redactions.redactions(forGuid: guid).compactMap(\.range)
-            where sp.lowerBound >= 0 && sp.upperBound <= sourceLen
-                && sp.lowerBound < sp.upperBound
-            {
-                redactionReps.append(
-                    BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
+            let clamped =
+                redactions.redactions(forGuid: guid).compactMap(\.range)
+                .filter {
+                    $0.lowerBound >= 0 && $0.upperBound <= sourceLen
+                        && $0.lowerBound < $0.upperBound
+                }
+                .sorted { $0.lowerBound < $1.lowerBound }
+            for sp in clamped {
+                if let last = redactionReps.last, sp.lowerBound <= last.range.upperBound {
+                    let merged =
+                        last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
+                    redactionReps[redactionReps.count - 1] = BodySubstitution(
+                        range: merged, token: "[redacted]", isRedaction: true)
+                } else {
+                    redactionReps.append(
+                        BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
+                }
             }
         }
 
