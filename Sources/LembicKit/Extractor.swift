@@ -268,7 +268,7 @@ public struct Extractor: Sendable {
                 SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id, m.service,
                        m.text, m.attributedBody, m.item_type,
                        m.associated_message_type amt, m.associated_message_guid amg,
-                       m.associated_message_emoji ame, m.balloon_bundle_id
+                       m.associated_message_emoji ame, m.balloon_bundle_id, m.date_retracted
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY m.date, m.ROWID
@@ -308,6 +308,7 @@ public struct Extractor: Sendable {
             sequence += 1
 
             if (row["item_type"] as Int64? ?? 0) != 0 { continue }  // system events
+            if (row["date_retracted"] as Int64? ?? 0) != 0 { continue }  // unsent
 
             let (text, hadAttachment) = Self.renderText(
                 attributedBody: row["attributedBody"],
