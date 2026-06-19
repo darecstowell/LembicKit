@@ -95,22 +95,53 @@ public enum SecretDetector {
     // noise while keeping recall: area 000 / 666 / 900–999, group 00, serial
     // 0000 are all impossible real SSNs. A phone number is 3-3-4 grouped, never
     // 3-2-4, so it cannot match this shape.
-    private static let ssnRegex = try! NSRegularExpression(
-        pattern: #"\b(\d{3})[- ](\d{2})[- ](\d{4})\b"#)
+    //
+    // The dashed form is a strong cue and fires keyword-free. The space form
+    // (`123 45 6789`) is far more ambiguous in chat (order numbers, scores,
+    // IDs), so it ALSO requires a nearby `ssn` / `social security` keyword,
+    // mirroring the routing-number proximity guard in `detectBankNumbers`.
+    private static let ssnDashRegex = try! NSRegularExpression(
+        pattern: #"\b(\d{3})-(\d{2})-(\d{4})\b"#)
+
+    private static let ssnSpaceRegex = try! NSRegularExpression(
+        pattern: #"\b(\d{3}) (\d{2}) (\d{4})\b"#)
+
+    private static let ssnContextRegex = try! NSRegularExpression(
+        pattern: #"(?i)\b(?:ssn|social security)\b"#)
 
     private static func detectSSNs(
         _ ns: NSString, _ whole: NSRange, _ guid: String, into out: inout [DetectedSecret]
     ) {
-        ssnRegex.enumerateMatches(in: ns as String, range: whole) { match, _, _ in
-            guard let match else { return }
-            let area = ns.substring(with: match.range(at: 1))
-            let group = ns.substring(with: match.range(at: 2))
-            let serial = ns.substring(with: match.range(at: 3))
-            guard isValidSSN(area: area, group: group, serial: serial) else { return }
+        ssnDashRegex.enumerateMatches(in: ns as String, range: whole) { match, _, _ in
+            guard let match, validSSNMatch(ns, match) else { return }
             out.append(
-                DetectedSecret(
-                    guid: guid, range: Range(match.range)!, category: .ssn))
+                DetectedSecret(guid: guid, range: Range(match.range)!, category: .ssn))
         }
+
+        var contextSpans: [NSRange] = []
+        ssnContextRegex.enumerateMatches(in: ns as String, range: whole) { m, _, _ in
+            if let m { contextSpans.append(m.range) }
+        }
+        guard !contextSpans.isEmpty else { return }
+        ssnSpaceRegex.enumerateMatches(in: ns as String, range: whole) { match, _, _ in
+            guard let match, validSSNMatch(ns, match) else { return }
+            let r = match.range
+            let near = contextSpans.contains { span in
+                let gapBefore = r.location - (span.location + span.length)
+                let gapAfter = span.location - (r.location + r.length)
+                return (gapBefore >= 0 && gapBefore <= 24) || (gapAfter >= 0 && gapAfter <= 24)
+            }
+            guard near else { return }
+            out.append(
+                DetectedSecret(guid: guid, range: Range(r)!, category: .ssn))
+        }
+    }
+
+    private static func validSSNMatch(_ ns: NSString, _ match: NSTextCheckingResult) -> Bool {
+        let area = ns.substring(with: match.range(at: 1))
+        let group = ns.substring(with: match.range(at: 2))
+        let serial = ns.substring(with: match.range(at: 3))
+        return isValidSSN(area: area, group: group, serial: serial)
     }
 
     static func isValidSSN(area: String, group: String, serial: String) -> Bool {

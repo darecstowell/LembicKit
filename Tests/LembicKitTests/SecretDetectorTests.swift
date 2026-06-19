@@ -83,9 +83,22 @@ struct SecretDetectorTests {
         #expect(
             SecretDetector.detect(in: [detRec("s4", "123-00-4567")]).isEmpty,
             "invalid SSN group 00 → none")
+        // The dashed form is a strong cue: it fires keyword-free.
         #expect(
-            SecretDetector.detect(in: [detRec("s5", "123 45 6789")]).count == 1,
-            "space-separated SSN detected")
+            SecretDetector.detect(in: [detRec("s5", "123-45-6789")]).count == 1,
+            "dashed SSN fires keyword-free")
+        // The space form is ambiguous (scores, order numbers, IDs): no keyword → none.
+        #expect(
+            SecretDetector.detect(in: [detRec("s6", "scores 123 45 6789 ok")]).isEmpty,
+            "bare space-grouped 3-2-4 run with no context → none")
+        // ...but the space form WITH a nearby keyword still fires.
+        #expect(
+            SecretDetector.detect(in: [detRec("s7", "ssn 123 45 6789")]).count == 1,
+            "space SSN with nearby 'ssn' keyword detected")
+        #expect(
+            SecretDetector.detect(in: [detRec("s8", "my social security is 123 45 6789")]).count
+                == 1,
+            "space SSN with nearby 'social security' keyword detected")
     }
 
     @Test func passwordInContext() {
