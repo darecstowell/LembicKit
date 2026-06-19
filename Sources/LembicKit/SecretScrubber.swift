@@ -97,9 +97,15 @@ public enum SecretScrubber {
     // each starting/ending alphanumeric, ending in a 2+-letter TLD. This is the
     // ubiquitous "good enough" email regex (a fact, not a curated rule), tuned to
     // avoid trailing-dot / leading-dot domains.
+    //
+    // ReDoS-hardened: the local part is atomic and length-capped (RFC 5321 ≤ 64)
+    // behind a non-local-char lookbehind so the engine can't re-anchor inside a
+    // hyphen run, and each domain label is atomic and length-bounded (RFC 1035
+    // ≤ 63). A long `a-a-…` token that never reaches a TLD can't backtrack.
     private static let emailRegex = try! NSRegularExpression(
         pattern:
-            #"(?i)\b[A-Z0-9._%+\-]+@(?:[A-Z0-9](?:[A-Z0-9\-]*[A-Z0-9])?\.)+[A-Z]{2,}\b"#)
+            #"(?i)(?<![A-Z0-9._%+\-])(?>[A-Z0-9._%+\-]{1,64})@(?:(?>[A-Z0-9](?:[A-Z0-9\-]{0,61}[A-Z0-9])?)\.)+[A-Z]{2,24}\b"#
+    )
 
     // MARK: - OTP / 2FA (high-precision forms ONLY)
     //
