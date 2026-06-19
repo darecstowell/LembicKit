@@ -51,10 +51,9 @@ public enum SecretDetector {
     // Trigger lexicon (case-insensitive, word-boundaried): password, passwd,
     // pwd, pw, passcode, passphrase.
     //
-    // Separator: an optional connector word `is` then one of `:` `=` `is` (any
-    // mix), then optional whitespace and an optional opening quote/backtick.
-    // We require the value to be glued to the trigger via that separator so the
-    // bare word "password" in prose ("I forgot my password") does NOT fire.
+    // Separator: a quoted value may use a relaxed/optional separator, but a BARE
+    // value REQUIRES a real separator (`is`, `:`, or `=`) gluing it to the
+    // trigger — otherwise the next prose word ("password please") would leak.
     //
     // Value rule: a run of non-whitespace characters, optionally wrapped in
     // matching quotes/backticks, that stops at whitespace or sentence
@@ -63,11 +62,11 @@ public enum SecretDetector {
     // not part of the value. The emitted range covers the VALUE only (the thing
     // that leaks), never the keyword.
     private static let passwordRegex: NSRegularExpression = {
-        // Group 1: quoted value (no closing quote captured). Group 2: bare value.
+        // Group 2: quoted value (no closing quote captured). Group 3: bare value.
         let pattern =
             #"(?i)\b(?:password|passwd|passcode|passphrase|pwd|pw)\b"#  // trigger
-            + #"\s*(?:is\b\s*)?[:=]?\s*"#  // separator
-            + #"(?:(["'`])([^"'`\s]+)|([^\s.,;!?'"`]+))"#  // quoted | bare value
+            + #"(?:(?:\s*(?:is\b\s*)?[:=]?\s*)(["'`])([^"'`\s]+)"#  // relaxed sep + quoted value
+            + #"|(?:\s+is\b\s*[:=]?|\s*[:=])\s*([^\s.,;!?'"`]+))"#  // required sep + bare value
         return try! NSRegularExpression(pattern: pattern)
     }()
 
@@ -385,11 +384,15 @@ public enum SecretDetector {
     // load-bearing: `meet me at gate 22B` (a boarding gate) and `garage 1234` (a
     // unit number) are extremely common in chat and must NOT trip the detector.
     // Requiring the code-noun + separator + a short code also keeps bare prose
-    // ("the code of conduct") from firing. The emitted range covers the CODE
-    // value only (not the keyword), mirroring the password detector.
+    // ("the code of conduct") from firing. A negative-qualifier list before
+    // `code` (zip/area/error/status/promo/...) keeps ordinary phrases like
+    // `area code 415` (itself bare PII) from firing. The emitted range covers
+    // the CODE value only (not the keyword), mirroring the password detector.
     private static let standingCodeRegex: NSRegularExpression = {
         let pattern =
             #"(?i)(?:\b(?:door|gate|garage|safe|alarm|lock)\s+)?"#  // optional place qualifier
+            + #"(?<!\bzip )(?<!\barea )(?<!\berror )(?<!\bstatus )(?<!\bcountry )"#
+            + #"(?<!\bpromo )(?<!\bpostal )(?<!\bdial )(?<!\bexit )"#  // negative qualifiers
             + #"\b(?:code|combination|passcode|pin|keypad)\b"#  // required code-noun
             + #"\s*(?:is\b\s*)?[:=]?\s*"#  // separator
             + #"(?:#\s*)?"#  // optional leading hash (e.g. "PIN #1234")
