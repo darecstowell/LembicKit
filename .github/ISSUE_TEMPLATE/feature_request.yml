@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a capability for the engine or the CLI.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LembicKit does one job: read a Messages `chat.db` and turn a conversation into a transcript an LLM can read.
+        Requests that sharpen that job are the best fit. A general backup or device-management feature probably belongs elsewhere.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem or use case
+      description: What are you trying to do, and where does LembicKit fall short today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+    validations:
+      required: false

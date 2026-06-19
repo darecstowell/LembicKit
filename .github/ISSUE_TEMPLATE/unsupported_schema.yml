@@ -1,0 +1,40 @@
+name: Unsupported Messages database
+description: LembicKit reports your chat.db schema is unsupported, or an export comes out wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The schema guard fails closed: if the `chat.db` does not match the tables and columns the engine reads,
+        it reports an error instead of producing a quietly wrong export. This template captures what we need to
+        add support for your OS version. Do not attach a real `chat.db`. It contains your private messages.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: The schema changes between OS versions, so this is the key detail.
+      placeholder: "macOS 15.1"
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: The exact error text
+      description: Paste the full message. The unsupported-schema error lists the missing table or column, which is exactly what we need.
+      placeholder: "Unsupported Messages database, missing message.some_column"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LembicKit version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: For example, whether this is a current Messages store or one imported or migrated from an older Mac.
+    validations:
+      required: false
