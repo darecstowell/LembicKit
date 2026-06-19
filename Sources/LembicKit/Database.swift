@@ -390,6 +390,7 @@ public final class ChatDatabase: @unchecked Sendable {
                 "guid", "date", "is_from_me", "handle_id", "service", "text",
                 "attributedBody", "item_type", "associated_message_type",
                 "associated_message_guid", "associated_message_emoji", "balloon_bundle_id",
+                "date_retracted",
             ]
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),

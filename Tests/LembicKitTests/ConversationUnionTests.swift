@@ -40,6 +40,14 @@ struct ConversationUnionTests {
         #expect(emptyUnion.isEmpty, "empty chat set → no rows")
     }
 
+    @Test func retractedMessageExcluded() throws {
+        let db = try Fixtures.openChatDB(populating: Fixtures.retractedSchemaAndData)
+        let ex = Extractor(targetHandles: [3], handleLabels: [:])
+        let recs = try db.queue.read { try ex.extractChat($0, chatID: 1) }
+        #expect(recs.map(\.guid) == ["kept"], "unsent (date_retracted != 0) row dropped")
+        #expect(recs.map(\.text) == ["still here"], "retracted body never surfaces")
+    }
+
     @Test func summariesAndGrouping() throws {
         let db = try Fixtures.openChatDB(populating: Fixtures.unionSchemaAndData)
 
