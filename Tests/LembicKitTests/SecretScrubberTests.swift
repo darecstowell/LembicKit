@@ -66,6 +66,23 @@ struct SecretScrubberTests {
             "no dotted TLD → not matched")
     }
 
+    // A 32 KB `a-` run that never reaches a TLD used to backtrack for seconds on
+    // the render thread. The hardened pattern must finish well under 50 ms.
+    @Test("email scrub is not ReDoS-vulnerable on a pathological hyphen run")
+    func emailReDoSGuard() {
+        let payload = "x@" + String(repeating: "a-", count: 16 * 1024)
+        let rec = detRec("g", payload)
+        let clock = ContinuousClock()
+        let elapsed = clock.measure {
+            _ = SecretScrubber.scrub(in: [rec], categories: [.email])
+        }
+        #expect(
+            elapsed < .milliseconds(50),
+            "a 32 KB a- payload must scrub in < 50 ms; took \(elapsed)")
+        // The hardened pattern still scrubs an ordinary address.
+        #expect(scrubbedSlices("ping jane@example.com please", [.email]) == ["jane@example.com"])
+    }
+
     // MARK: - Postal address (NSDataDetector)
 
     @Test("postal addresses scrubbed")
