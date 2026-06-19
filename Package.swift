@@ -26,17 +26,6 @@ let package = Package(
             dependencies: [
                 "LembicKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ],
-            exclude: ["Info.plist"],
-            // TCC auto-denies privacy requests from binaries without a usage
-            // description, so embed an Info.plist into the executable.
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/lembic-cli/Info.plist",
-                ])
             ]
         ),
         .testTarget(
