@@ -89,7 +89,7 @@ By default the transcript labels the other person by number. Pass `--contacts` t
 LEMBIC_CONTACTS=Examples/contacts.vcf swift run lembic-cli conversations Examples/chat.db --contacts
 ```
 
-Without `LEMBIC_CONTACTS`, `--contacts` reads the system Contacts store, and macOS asks for permission the first time.
+Without `LEMBIC_CONTACTS`, `--contacts` tries the system Contacts store. A command-line build carries no Contacts usage description, so macOS denies that access and the CLI falls back to plain numbers. For names from the system address book, pass a `LEMBIC_CONTACTS` vCard, or use the Lembic app, which is a signed bundle with the usage description and prompts for access.
 
 ## Build and test
 
