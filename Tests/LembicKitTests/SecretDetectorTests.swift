@@ -121,6 +121,28 @@ struct SecretDetectorTests {
         #expect(
             SecretDetector.detect(in: [detRec("p3", "I forgot my password")]).isEmpty,
             "bare 'I forgot my password' (no value) → none")
+        // Quoted value with a relaxed separator still fires.
+        let p4 = SecretDetector.detect(in: [detRec("p4", #"password "hunter2" please"#)])
+            .filter { $0.category == .password }
+        #expect(p4.count == 1, "quoted value with relaxed separator → one .password")
+        if let m = p4.first {
+            #expect(
+                (#"password "hunter2" please"# as NSString).substring(with: NSRange(m.range))
+                    == "hunter2",
+                "quoted password value sliced")
+        }
+
+        // FALSE-POSITIVE GUARD: trigger keyword + a bare prose word with NO real
+        // separator must NOT fire (the next word is not the value).
+        func noPw(_ text: String, _ label: String) {
+            #expect(
+                SecretDetector.detect(in: [detRec("pn", text)]).filter {
+                    $0.category == .password
+                }.isEmpty,
+                "\(label) → no .password (prose, no separator)")
+        }
+        noPw("password please", "password please")
+        noPw("password reset link", "password reset link")
     }
 
     @Test func alertFatigueGuard() {
@@ -309,6 +331,15 @@ struct SecretDetectorTests {
         noFire("lock 5", "lock 5")
         noFire("door 3", "door 3")
         noFire("garage 1234", "garage 1234")
+
+        // THE PROSE GUARD — a negative qualifier before `code` makes it an
+        // ordinary noun (zip/area/error/status/promo code), not a standing code.
+        // An area code is itself ordinary PII, doubly forbidden.
+        noFire("zip code 90210", "zip code 90210")
+        noFire("area code 415", "area code 415")
+        noFire("error code 500", "error code 500")
+        noFire("status code 200", "status code 200")
+        noFire("promo code 20OFF", "promo code 20OFF")
     }
 
     @Test func ibanAndRouting() {
