@@ -117,18 +117,40 @@ public enum ContactsMap {
         }
     }
 
+    /// ISO 3166-1 alpha-2 region whose calling code prefixes a bare national
+    /// number. `US` preserves the prior hardcoded behavior, so it is the default.
+    public static let defaultRegion = "US"
+
+    /// Calling code for a region; falls back to NANP (`1`) for an unknown code.
+    private static let callingCodes: [String: String] = [
+        "US": "1", "CA": "1", "GB": "44", "FR": "33", "DE": "49", "AU": "61",
+        "IE": "353", "ES": "34", "IT": "39", "NL": "31", "MX": "52", "JP": "81",
+    ]
+
     /// chat.db handle ids are already E.164 phones or lowercase-ish emails;
     /// normalize both sides the same way before matching.
-    public static func normalizeHandle(_ handle: String) -> String {
-        handle.contains("@") ? handle.lowercased() : (normalizePhone(handle) ?? handle)
+    public static func normalizeHandle(_ handle: String, defaultRegion: String = defaultRegion)
+        -> String
+    {
+        handle.contains("@")
+            ? handle.lowercased() : (normalizePhone(handle, defaultRegion: defaultRegion) ?? handle)
     }
 
-    /// Best-effort E.164: keep digits, assume US (+1) for bare 10-digit numbers.
-    public static func normalizePhone(_ raw: String) -> String? {
+    /// Best-effort E.164. A `+` prefix is authoritative (keep its digits). For a
+    /// bare national number, strip a single trunk `0` and prepend the default
+    /// region's calling code; an 11-digit leading-`1` is treated as NANP,
+    /// mirroring `Conversations.displayNumber`.
+    public static func normalizePhone(_ raw: String, defaultRegion: String = defaultRegion)
+        -> String?
+    {
+        if raw.contains("@") { return nil }
         let digits = raw.filter(\.isNumber)
         guard digits.count >= 7 else { return nil }
-        if digits.count == 10 { return "+1" + digits }
-        return "+" + digits
+        if raw.contains("+") { return "+" + digits }
+        if digits.count == 11, digits.hasPrefix("1") { return "+" + digits }
+        let national = digits.hasPrefix("0") ? String(digits.dropFirst()) : digits
+        let code = callingCodes[defaultRegion.uppercased()] ?? "1"
+        return "+" + code + national
     }
 
     /// Resolve a chat.db handle map (ROWID → phone/email) to display names

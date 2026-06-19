@@ -360,7 +360,8 @@ public enum Conversations {
                     for (hid, n) in participantCounts[cid] ?? [:] { acc[hid, default: 0] += n }
                 }
                 let ordered = a.handleSet.map { hid -> Participant in
-                    let ident = handleLabels[hid].map(ContactsMap.normalizeHandle) ?? "h\(hid)"
+                    let ident =
+                        handleLabels[hid].map { ContactsMap.normalizeHandle($0) } ?? "h\(hid)"
                     return Participant(handleID: hid, identifier: ident)
                 }
                 .sorted { lhs, rhs in
