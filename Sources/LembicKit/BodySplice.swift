@@ -136,26 +136,9 @@ enum BodySplice {
     }
 }
 
-/// Forward/inverse offset map for ONE message body, source-`text` UTF-16
-/// index ↔ output-body UTF-16 index (output-body = offsets relative to the
-/// start of the rendered body, BEFORE the `"HH:mm Speaker: "` prefix is
-/// added). Built by simulating both transforms once and recording each
-/// breakpoint's cumulative output position, so lookups are O(log n) (or a
-/// short linear scan) with no re-encoding.
-///
-/// Two transforms, applied in pipeline order, are modelled exactly:
-///   (a) span redaction: each source `[start,end)` collapses to the literal
-///       `[redacted]`. Any source index inside a replaced span maps to the
-///       token's start; indices after it shift by (tokenLen − spanLen).
-///   (b) `\n` → `\n` + 8 spaces: each surviving newline inserts 8 spaces
-///       immediately after it, so every output index past it shifts by +8.
-/// Both are folded into the breakpoint table, so `outStart` is the TRUE
-/// output-body position and no caller needs to re-count newlines.
-/// The attachment-placeholder trim is one more replacement in the same table, so
-/// trim, redaction, and highlight offsets all stay in source coordinates.
-///
-/// Extracted from the transcript renderer (the offset-map extraction) so the
-/// redaction-coordinate math has its own isolated test surface (`RedactionMapTests`).
+/// Maps one body's source UTF-16 offsets to output-body offsets and back. It folds
+/// each substitution and the 8-space indent after every newline into one breakpoint table.
+/// Tested in `RedactionMapTests` and `BodySpliceTests`.
 struct OffsetMap: Sendable {
     /// One contiguous span of source indices that maps affinely (slope 1)
     /// to output, plus the redacted spans which collapse to a point. A
