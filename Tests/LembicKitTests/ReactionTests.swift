@@ -7,11 +7,28 @@ import Testing
 struct ReactionTests {
     private func raw(
         _ date: Int64, _ seq: Int, target: String = "G1", reactor: String = "h3",
-        label: String = "Them", emoji: String = "❤️", remove: Bool = false
+        label: String = "Them", emoji: String = "❤️", remove: Bool = false, part: Int = 0
     ) -> RawReaction {
         RawReaction(
-            dateNS: date, sequence: seq, targetGUID: target, reactorKey: reactor,
+            dateNS: date, sequence: seq, targetGUID: target, part: part, reactorKey: reactor,
             reactorLabel: label, emoji: emoji, isRemove: remove)
+    }
+
+    @Test func partIndexIsKept() {
+        #expect(Reactions.target(from: "p:2/ABC-123") == ("ABC-123", 2))
+        #expect(Reactions.target(from: "bp:ABC-123") == ("ABC-123", 0))
+        #expect(Reactions.target(from: "ABC-123") == ("ABC-123", 0))
+    }
+
+    @Test func partsNetApart() {
+        let netted = Reactions.net([
+            raw(1, 0, emoji: "❤️", part: 0),
+            raw(2, 1, emoji: "😂", part: 1),
+            raw(3, 2, emoji: "❤️", remove: true, part: 0),
+        ])
+        #expect(
+            netted.map(\.reaction.emoji) == ["😂"],
+            "removing the heart on photo 1 keeps photo 2's laugh")
     }
 
     @Test func targetGUIDStripping() {

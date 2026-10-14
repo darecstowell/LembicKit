@@ -31,6 +31,9 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Reactions on different parts of one message net apart. Removing a heart on
+  the first photo of a grid no longer removes the laugh on the second photo
+  (lembickit.md F10).
 - Two different people with the same contact name no longer merge into one 1:1.
   `Conversations.group` takes a `contactIDs:` map and keys each person by their
   Contacts card, not by the name. A caller that passes only names gets one

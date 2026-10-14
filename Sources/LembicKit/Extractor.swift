@@ -323,7 +323,7 @@ public struct Extractor: Sendable {
             let kind = Reactions.kind(of: amt)
             if kind != .message {
                 let reactor = isFromMe ? "me" : "h\(handleID)"
-                let target = Reactions.targetGUID(from: row["amg"] as String? ?? "")
+                let (target, part) = Reactions.target(from: row["amg"] as String? ?? "")
                 let key: String
                 let emoji: String
                 var isRemove = false
@@ -351,6 +351,7 @@ public struct Extractor: Sendable {
                         dateNS: dateNS,
                         sequence: sequence,
                         targetGUID: target,
+                        part: part,
                         reactorKey: key,
                         reactorLabel: label(isFromMe: isFromMe, handleID: handleID),
                         emoji: emoji,
