@@ -10,6 +10,12 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Changed
 
+- Transcript headers say "Messages transcript" (and "Messages group
+  transcript"), not "iMessage", because SMS and RCS threads export too. The
+  attachment legend lists only the placeholder kinds that occur in the
+  transcript, and is left out when there are none. JSONL `svc` uses plain
+  labels: iMessage is left out, `iMessageLite` reads "iMessage via satellite"
+  (lembickit.md F25).
 - JSONL `"d"` is ISO 8601 with the UTC offset (`2026-11-01T01:10:00-06:00`),
   not a bare local time, so a DST fall-back hour sorts and reads correctly
   (lembickit.md F24).

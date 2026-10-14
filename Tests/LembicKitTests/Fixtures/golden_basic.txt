@@ -1,8 +1,7 @@
-# iMessage transcript with +15551234567
+# Messages transcript with +15551234567
 # 2023-11-14 → 2023-11-15 · 4 messages · 1 reactions · 0 with attachments
 # Speakers: Me = the account owner, Them = +15551234567
 # Reactions shown as [Them: ❤️] after the message they target.
-# Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
 # Times are local (America/Chicago), 24h. Section headers are calendar days.
 
 

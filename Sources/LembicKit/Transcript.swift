@@ -93,6 +93,8 @@ public enum Transcript {
     /// markers from `AttachmentInfo.placeholder` plus the FindMy `[shared
     /// location]` fallback (`Extractor.renderText`). Kept here because stripping
     /// is a render-layer concern; keep in lockstep if a new marker is added.
+    /// Genmoji (`[genmoji: …]`) is stripped by prefix; a voice note's words
+    /// (`[audio: "…"]`) are content and stay.
     static let placeholderTokens = [
         "[photo]", "[video]", "[gif]", "[audio]", "[pdf]",
         "[contact]", "[attachment]", "[shared location]", "[sticker]", "[location]",
@@ -106,8 +108,29 @@ public enum Transcript {
         for token in placeholderTokens {
             out = out.replacingOccurrences(of: token, with: " ")
         }
+        out = out.replacingOccurrences(
+            of: #"\[genmoji: [^\]]*\]"#, with: " ", options: .regularExpression)
         return Extractor.collapseSpaceRuns(out)
             .trimmingCharacters(in: Extractor.pythonWhitespace)
+    }
+
+    /// The legend entries, in a fixed order, for the placeholder kinds that occur
+    /// in `bodies`. A voice note with words counts as `[audio]`.
+    static func legendTokens(in bodies: [String]) -> [String] {
+        let kinds: [(token: String, matches: [String])] = [
+            ("[photo]", ["[photo]"]), ("[video]", ["[video]"]), ("[gif]", ["[gif]"]),
+            ("[audio]", ["[audio]", "[audio: \""]), ("[pdf]", ["[pdf]"]),
+            ("[contact]", ["[contact]"]), ("[location]", ["[location]"]),
+            ("[shared location]", ["[shared location]"]), ("[sticker]", ["[sticker]"]),
+            ("[genmoji: …]", ["[genmoji: "]), ("[attachment]", ["[attachment]"]),
+        ]
+        var found = Set<String>()
+        for body in bodies where body.contains("[") {
+            for kind in kinds where !found.contains(kind.token) {
+                if kind.matches.contains(where: body.contains) { found.insert(kind.token) }
+            }
+        }
+        return kinds.map(\.token).filter(found.contains)
     }
 
     /// Each DST fall-back hour between two dates: the instants whose local clock
@@ -582,12 +605,12 @@ public enum Transcript {
         // Anonymizing scrubs the counterparty's number/name from the header — the
         // whole point is to hide who the thread is with.
         if let group, renderGroup {
-            out += "# iMessage group transcript: \"\(group.name)\"\n"
+            out += "# Messages group transcript: \"\(group.name)\"\n"
         } else if noteToSelf, !anonymize {
-            out += "# iMessage transcript: notes to self\n"
+            out += "# Messages transcript: notes to self\n"
         } else {
             out +=
-                anonymize ? "# iMessage transcript\n" : "# iMessage transcript with \(number)\n"
+                anonymize ? "# Messages transcript\n" : "# Messages transcript with \(number)\n"
         }
         if let first = emit.first, let last = emit.last {
             var parts = ["\(comma(messages)) messages"]
@@ -629,10 +652,11 @@ public enum Transcript {
             }
             out += "# Reactions shown as [\(reactor): ❤️] after the message they target.\n"
         }
-        if !trim.dropAttachmentPlaceholders {
+        let shown = legendTokens(in: emit.map(\.text))
+        if !trim.dropAttachmentPlaceholders, !shown.isEmpty {
             out +=
-                "# Attachments shown as typed placeholders: [photo] [video] [gif] "
-                + "[audio] [pdf] [contact] [shared location].\n"
+                "# Attachments shown as typed placeholders: "
+                + shown.joined(separator: " ") + ".\n"
         }
         let zoneName = anonymize ? "" : " (\(timeZone.identifier))"
         out += "# Times are local\(zoneName), 24h. Section headers are calendar days.\n\n"
@@ -870,7 +894,7 @@ public enum Transcript {
                 ("s", jsonString(aliases[r.speaker] ?? r.speaker)),
                 ("m", jsonString(body)),
             ]
-            if let svc = r.service, svc != "iMessage" {
+            if let svc = r.service.flatMap(serviceLabel) {
                 fields.append(("svc", jsonString(svc)))
             }
             if !r.reactions.isEmpty {
@@ -884,6 +908,15 @@ public enum Transcript {
             out += "{" + fields.map { "\"\($0.0)\": \($0.1)" }.joined(separator: ", ") + "}\n"
         }
         return out
+    }
+
+    /// A plain label for `message.service`, or nil for iMessage (the default).
+    static func serviceLabel(_ service: String) -> String? {
+        switch service {
+        case "iMessage", "": nil
+        case "iMessageLite": "iMessage via satellite"
+        default: service
+        }
     }
 
     /// JSON string literal matching Python json.dumps(ensure_ascii=False):

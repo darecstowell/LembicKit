@@ -43,7 +43,7 @@ struct NoteToSelfTests {
         #expect(rendered.records.allSatisfy { $0.speaker == "Me" })
         #expect(rendered.skipped.map(\.reason) == [.echo])
         let txt = try #require(rendered.txt)
-        #expect(txt.hasPrefix("# iMessage transcript: notes to self\n"))
+        #expect(txt.hasPrefix("# Messages transcript: notes to self\n"))
         #expect(txt.contains("# Speakers: Me = the account owner\n"))
     }
 

@@ -253,7 +253,7 @@ extension Export {
         let former = conversation.participants.filter(\.isFormer).map { $0.label ?? $0.identifier }
         // A degenerate group with an empty roster has no labels to join, so fall
         // back to the conversation's (already non-empty) displayName so the
-        // `# iMessage group transcript:` header is never blank.
+        // `# Messages group transcript:` header is never blank.
         let joined = labels.joined(separator: ", ")
         let name = conversation.groupName ?? (joined.isEmpty ? conversation.displayName : joined)
         return Transcript.GroupRenderInfo(

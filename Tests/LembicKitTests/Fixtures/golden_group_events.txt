@@ -1,8 +1,8 @@
-# iMessage group transcript: "Trip crew"
+# Messages group transcript: "Trip crew"
 # 2023-11-14 → 2023-11-15 · 4 messages · 1 reactions · 1 with attachments
 # Participants: Me = the account owner · Alice · Bob · (844) 399-6927
 # Reactions shown as [Alice: ❤️] after the message they target.
-# Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
+# Attachments shown as typed placeholders: [photo].
 # Times are local (America/Chicago), 24h. Section headers are calendar days.
 
 

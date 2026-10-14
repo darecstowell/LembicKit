@@ -22,7 +22,7 @@ struct ExportSeamTests {
         #expect(both.txt != nil, "txt produced when requested")
         #expect(both.jsonl != nil, "jsonl produced when requested")
         #expect(
-            both.txt?.contains("# iMessage transcript with +1") ?? false,
+            both.txt?.contains("# Messages transcript with +1") ?? false,
             "txt has the daily-grouped header")
         #expect(
             both.jsonl?.split(separator: "\n").count == 3,
