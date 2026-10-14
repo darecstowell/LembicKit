@@ -91,7 +91,7 @@ public enum Transcript {
     /// is a render-layer concern; keep in lockstep if a new marker is added.
     static let placeholderTokens = [
         "[photo]", "[video]", "[gif]", "[audio]", "[pdf]",
-        "[contact]", "[attachment]", "[shared location]",
+        "[contact]", "[attachment]", "[shared location]", "[sticker]", "[location]",
     ]
 
     /// Remove placeholder tokens from one already-rendered message body. Caller

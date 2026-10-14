@@ -482,7 +482,10 @@ public final class ChatDatabase: @unchecked Sendable {
             ]
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),
-        ("attachment", ["mime_type", "uti", "transfer_name"]),
+        (
+            "attachment",
+            ["mime_type", "uti", "transfer_name", "is_sticker", "emoji_image_short_description"]
+        ),
         ("chat_lookup", ["chat", "identifier"]),
     ]
 

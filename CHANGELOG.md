@@ -31,6 +31,11 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Attachments get the right type. A sticker shows `[sticker]`, a Genmoji shows
+  `[genmoji: pink poodle]`, a dropped pin (`public.vlocation`, `.loc.vcf`) shows
+  `[location]` instead of `[contact]`, and an m4a voice memo (`audio/mp4`) shows
+  `[audio]` instead of `[video]`. `AttachmentInfo` has new `isSticker` and
+  `emojiDescription` fields with defaulted init parameters (lembickit.md F11).
 - Reactions on different parts of one message net apart. Removing a heart on
   the first photo of a grid no longer removes the laugh on the second photo
   (lembickit.md F10).

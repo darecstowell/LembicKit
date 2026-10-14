@@ -156,7 +156,9 @@ public struct Extractor: Sendable {
                 SELECT maj.ROWID majid, maj.message_id mid,
                        \(cols.column("at", "attachment", "mime_type")) mime_type,
                        \(cols.column("at", "attachment", "uti")) uti,
-                       \(cols.column("at", "attachment", "transfer_name")) transfer_name
+                       \(cols.column("at", "attachment", "transfer_name")) transfer_name,
+                       \(cols.column("at", "attachment", "is_sticker")) is_sticker,
+                       \(cols.column("at", "attachment", "emoji_image_short_description")) genmoji
                 FROM chat_message_join cmj
                 JOIN message_attachment_join maj ON maj.message_id = cmj.message_id
                 JOIN attachment at ON at.ROWID = maj.attachment_id
@@ -168,7 +170,9 @@ public struct Extractor: Sendable {
             let majid: Int64 = row["majid"]
             guard seenLinks.insert(majid).inserted else { continue }
             let info = AttachmentInfo(
-                mimeType: row["mime_type"], uti: row["uti"], transferName: row["transfer_name"])
+                mimeType: row["mime_type"], uti: row["uti"], transferName: row["transfer_name"],
+                isSticker: (row["is_sticker"] as Int64? ?? 0) != 0, emojiDescription: row["genmoji"]
+            )
             map[row["mid"], default: []].append(info)
         }
         return map
