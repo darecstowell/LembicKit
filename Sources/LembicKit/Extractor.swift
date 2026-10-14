@@ -406,7 +406,10 @@ public struct Extractor: Sendable {
     ///   Actor = `handle_id` / `is_from_me`; affected person = `other_handle`.
     /// - **2** — group renamed. New name = `group_title` (empty ⇒ name cleared).
     ///   Actor = `handle_id` / `is_from_me`.
-    /// - **3** — a participant left. Actor (the leaver) = `handle_id` / `is_from_me`.
+    /// - **3** — by `group_action_type`: 0 left, 1/2 group photo changed/removed,
+    ///   4/6 chat background changed/removed. Actor = `handle_id` / `is_from_me`.
+    /// - An add whose `other_handle` is the actor is a phone-number change. Unknown
+    ///   action values are skipped, never guessed.
     ///
     /// Each column value is read defensively, so a NULL degrades to a less
     /// specific phrasing. The event columns are in `optionalSchema`, so they are
@@ -454,18 +457,24 @@ public struct Extractor: Sendable {
             let actor = systemEventLabel(isFromMe: isFromMe, handleID: handleID)
 
             let line: String?
+            let action: Int64 = row["gat"] ?? 0
             switch itemType {
             case 1:
-                let action: Int64 = row["gat"] ?? 0
-                let affected = systemEventLabel(
-                    isFromMe: false, handleID: row["ohandle"] ?? 0)
-                line = Self.addRemoveLine(actor: actor, affected: affected, added: action == 0)
+                let other: Int64 = row["ohandle"] ?? 0
+                let affected = systemEventLabel(isFromMe: false, handleID: other)
+                if action == 0, other != 0, other == handleID, !isFromMe {
+                    line = actor.map { "\($0) changed their phone number" }
+                } else if action == 0 || action == 1 {
+                    line = Self.addRemoveLine(actor: actor, affected: affected, added: action == 0)
+                } else {
+                    line = nil
+                }
             case 2:
                 let title = (row["gtitle"] as String?)?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 line = Self.renameLine(actor: actor, title: title)
             case 3:
-                line = Self.leftLine(actor: actor)
+                line = Self.groupChangeLine(actor: actor, action: action)
             default:
                 line = nil
             }
@@ -503,9 +512,19 @@ public struct Extractor: Sendable {
         return "\(who) cleared the group name"
     }
 
-    /// `<actor> left` — nil when the leaver didn't resolve (a degenerate system row
-    /// with no handle, which the live DB carries; nothing legible to attribute).
-    static func leftLine(actor: String?) -> String? {
-        actor.map { "\($0) left" }
+    /// An `item_type` 3 row by `group_action_type`: 0 left, 1 and 2 the group
+    /// photo, 4 and 6 the chat background. Nil for an unknown action or no actor.
+    static func groupChangeLine(actor: String?, action: Int64) -> String? {
+        let verb: String? =
+            switch action {
+            case 0: "left"
+            case 1: "changed the group photo"
+            case 2: "removed the group photo"
+            case 4: "changed the chat background"
+            case 6: "removed the chat background"
+            default: nil
+            }
+        guard let actor, let verb else { return nil }
+        return "\(actor) \(verb)"
     }
 }

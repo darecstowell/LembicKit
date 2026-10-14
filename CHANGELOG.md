@@ -31,6 +31,11 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Group events no longer tell a false story. A group photo or chat background
+  change reads "X changed the group photo" (or removed it, or changed the chat
+  background) instead of "X left", a member's number change reads "X changed
+  their phone number" instead of "X added X", and unknown action values are
+  skipped (lembickit.md F7).
 - Sticker reactions and unknown reaction types no longer show as separate
   messages. A sticker tapback (2007, removed by 3007) and a sticker placed on a
   bubble (1000) attach to their target as `[Them: sticker]`. Any future tapback
