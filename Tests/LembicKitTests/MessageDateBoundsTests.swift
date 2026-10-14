@@ -12,14 +12,14 @@ import Testing
 @Suite("message date bounds")
 struct MessageDateBoundsTests {
     /// The group fixture's real messages span date 50 (the earliest, the `se0`
-    /// rename event) to 700 (`gm6`). The bounds come back as Apple-epoch Dates, so
-    /// each value is `ns / 1e9 + 978_307_200` seconds since 1970.
+    /// rename event) to 700 (`gm6`). Values below 10^12 are seconds-era rows, so
+    /// each bound is `raw + 978_307_200` seconds since 1970.
     @Test func boundsSpanTheRealMessages() throws {
         let db = try Fixtures.openChatDB(populating: Fixtures.groupSchemaAndData)
         let bounds = try db.messageDateBounds()
         let offset = Extractor.appleEpochOffset
-        #expect(bounds.oldest == Date(timeIntervalSince1970: 50.0 / 1e9 + offset))
-        #expect(bounds.newest == Date(timeIntervalSince1970: 700.0 / 1e9 + offset))
+        #expect(bounds.oldest == Date(timeIntervalSince1970: 50 + offset))
+        #expect(bounds.newest == Date(timeIntervalSince1970: 700 + offset))
     }
 
     /// An empty `message` table (and the `date = 0` sentinel filter) yields
@@ -46,7 +46,26 @@ struct MessageDateBoundsTests {
         let db = try Fixtures.openChatDB(populating: sql)
         let bounds = try db.messageDateBounds()
         let offset = Extractor.appleEpochOffset
-        #expect(bounds.oldest == Date(timeIntervalSince1970: 500.0 / 1e9 + offset))
-        #expect(bounds.newest == Date(timeIntervalSince1970: 500.0 / 1e9 + offset))
+        #expect(bounds.oldest == Date(timeIntervalSince1970: 500 + offset))
+        #expect(bounds.newest == Date(timeIntervalSince1970: 500 + offset))
+    }
+
+    /// Old rows store seconds, newer rows nanoseconds. Both read as real dates.
+    @Test func secondsAndNanosecondsBothRead() throws {
+        let sql =
+            Fixtures.fullSchema + """
+                INSERT INTO message (ROWID, guid, date, is_from_me, handle_id, service, text) VALUES
+                    (1,'a',486498600,0,0,'iMessage','2016, in seconds'),
+                    (2,'b',788918400000000000,0,0,'iMessage','2026, in nanoseconds'),
+                    (3,'c',-5,0,0,'iMessage','unknown');
+                """
+        let db = try Fixtures.openChatDB(populating: sql)
+        let bounds = try db.messageDateBounds()
+        let offset = Extractor.appleEpochOffset
+        #expect(bounds.oldest == Date(timeIntervalSince1970: 486_498_600 + offset))
+        #expect(bounds.newest == Date(timeIntervalSince1970: 788_918_400 + offset))
+        #expect(Extractor.appleDate(0) == nil)
+        #expect(Extractor.appleDate(-5) == nil)
+        #expect(Extractor.appleDate(nil) == nil)
     }
 }

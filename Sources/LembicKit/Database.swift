@@ -102,12 +102,7 @@ public final class ChatDatabase: @unchecked Sendable {
             // Both are NULL together (no qualifying rows) or both present.
             let lo: Int64? = row["lo"]
             let hi: Int64? = row["hi"]
-            func date(_ ns: Int64?) -> Date? {
-                ns.map {
-                    Date(timeIntervalSince1970: Double($0) / 1e9 + Extractor.appleEpochOffset)
-                }
-            }
-            return (date(lo), date(hi))
+            return (Extractor.appleDate(lo), Extractor.appleDate(hi))
         }
     }
 
@@ -245,14 +240,12 @@ public final class ChatDatabase: @unchecked Sendable {
                     ORDER BY lastDate DESC
                     """)
             return rows.map { row in
-                let ns: Int64 = row["lastDate"] ?? 0
                 return ConversationSummary(
                     chatID: row["cid"],
                     identifier: row["ident"],
                     service: row["svc"],
                     handleID: row["hid"] ?? 0,
-                    lastMessageDate: Date(
-                        timeIntervalSince1970: Double(ns) / 1e9 + Extractor.appleEpochOffset),
+                    lastMessageDate: Self.summaryDate(row["lastDate"]),
                     messageCount: row["cnt"] ?? 0,
                     guid: row["cguid"],
                     ownerIdentifiers: Self.splitAddresses(row["me"]))
@@ -353,7 +346,6 @@ public final class ChatDatabase: @unchecked Sendable {
                     ORDER BY lastDate DESC
                     """)
             return rows.map { row in
-                let ns: Int64 = row["lastDate"] ?? 0
                 let cid: Int64 = row["cid"]
                 let name = (row["dname"] as String?).flatMap { $0.isEmpty ? nil : $0 }
                 let firstNS: Int64? = row["firstDate"]
@@ -362,15 +354,12 @@ public final class ChatDatabase: @unchecked Sendable {
                     identifier: row["ident"],
                     service: row["svc"],
                     displayName: name,
-                    lastMessageDate: Date(
-                        timeIntervalSince1970: Double(ns) / 1e9 + Extractor.appleEpochOffset),
+                    lastMessageDate: Self.summaryDate(row["lastDate"]),
                     messageCount: row["cnt"] ?? 0,
                     participantHandles: (rosters[cid] ?? []).sorted(),
                     guid: row["cguid"],
                     groupID: row["gid"],
-                    firstMessageDate: firstNS.map {
-                        Date(timeIntervalSince1970: Double($0) / 1e9 + Extractor.appleEpochOffset)
-                    },
+                    firstMessageDate: Extractor.appleDate(firstNS),
                     ownerIdentifiers: Self.splitAddresses(row["me"]))
             }
         }
@@ -475,6 +464,11 @@ public final class ChatDatabase: @unchecked Sendable {
         Set(
             (joined ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty })
+    }
+
+    /// A summary's newest date; the 2001 epoch when no row has a known date.
+    static func summaryDate(_ raw: Int64?) -> Date {
+        Extractor.appleDate(raw) ?? Date(timeIntervalSince1970: Extractor.appleEpochOffset)
     }
 
     /// `m.date`, or NULL for a Send Later row that has not gone out, so a future

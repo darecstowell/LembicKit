@@ -31,6 +31,12 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Old rows stored in seconds show their real date (2016, not 2000-12-31). One
+  helper reads `message.date` as nanoseconds at or above 10^12 and as seconds
+  below it, in the extractor, the event stream, the summaries, and
+  `messageDateBounds()`, and the extractor sorts on the same normalized value.
+  A date of 0, NULL, or below 0 is unknown: the row is skipped and counted as
+  `SkippedMessage.Reason.invalidDate` (lembickit.md F17).
 - Attachment placeholders sit where they belong. Each U+FFFC pairs with the
   attachment its `__kIMFileTransferGUIDAttributeName` names (`attachment.guid`,
   new `AttachmentInfo.guid`), and falls back to join order only when no GUID

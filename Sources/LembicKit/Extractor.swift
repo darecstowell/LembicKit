@@ -363,6 +363,23 @@ public struct Extractor: Sendable {
 
     static let appleEpochOffset: TimeInterval = 978_307_200  // 1970→2001
 
+    /// A raw `message.date` in nanoseconds since 2001. Old rows store seconds, so a
+    /// value below 10^12 is scaled up. Nil for 0, NULL, and negative values.
+    static func nanoseconds(_ raw: Int64?) -> Int64? {
+        guard let raw, raw > 0 else { return nil }
+        return raw >= 1_000_000_000_000
+            ? raw : raw.multipliedReportingOverflow(by: 1_000_000_000).partialValue
+    }
+
+    /// A raw `message.date` as a `Date`, or nil when it is unknown.
+    static func appleDate(_ raw: Int64?) -> Date? {
+        nanoseconds(raw).map { Date(timeIntervalSince1970: Double($0) / 1e9 + appleEpochOffset) }
+    }
+
+    /// `m.date` in nanoseconds for `ORDER BY`, so seconds-era rows sort by time.
+    static let sortableDate =
+        "CASE WHEN m.date < 1000000000000 THEN m.date * 1000000000 ELSE m.date END"
+
     /// Ordered emitted records for one chat (reactions netted, attachments
     /// attached) — a single-chat convenience over `extractConversation`.
     public func extractChat(_ db: GRDB.Database, chatID: Int64) throws -> [MessageRecord] {
@@ -410,7 +427,7 @@ public struct Extractor: Sendable {
                        \(m("schedule_type")) schedule_type
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
-                ORDER BY m.date, m.ROWID
+                ORDER BY \(Self.sortableDate), m.ROWID
                 """,
             arguments: StatementArguments(ids))
 
@@ -419,16 +436,18 @@ public struct Extractor: Sendable {
             if seenROWIDs.contains(rowid) { continue }
             seenROWIDs.insert(rowid)
 
-            let dateNS: Int64 = row["date"] ?? 0
+            let rawDate: Int64? = row["date"]
+            let dateNS = Self.nanoseconds(rawDate) ?? 0
             let isFromMe = (row["is_from_me"] as Int64? ?? 0) != 0
             let handleID: Int64 = row["handle_id"] ?? 0
             let amt: Int64 = row["amt"] ?? 0
             // Floor to whole seconds: chat.db dates carry sub-second precision,
             // and DateFormatter rounds fractional seconds up while strftime
             // (the Python reference) truncates them.
-            let date = Date(
-                timeIntervalSince1970: (Double(dateNS) / 1e9 + Self.appleEpochOffset).rounded(.down)
-            )
+            let knownDate = Self.appleDate(rawDate).map {
+                Date(timeIntervalSince1970: $0.timeIntervalSince1970.rounded(.down))
+            }
+            let date = knownDate ?? Date(timeIntervalSince1970: Self.appleEpochOffset)
 
             let kind = Reactions.kind(of: amt)
             if kind != .message {
@@ -453,7 +472,7 @@ public struct Extractor: Sendable {
                     emoji = texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", ")
                 case .message, .unknown:
                     Self.log.notice("skipped a row with associated_message_type \(amt)")
-                    skipped.append(SkippedMessage(date: date, reason: .unknownReaction))
+                    skipped.append(SkippedMessage(date: knownDate, reason: .unknownReaction))
                     sequence += 1
                     continue
                 }
@@ -485,14 +504,18 @@ public struct Extractor: Sendable {
                 payload: payload)
             if itemType != 0 {
                 guard !text.isEmpty, text != Self.unreadableMarker else {
-                    skipped.append(SkippedMessage(date: date, reason: .unknownType))
+                    skipped.append(SkippedMessage(date: knownDate, reason: .unknownType))
                     continue
                 }
                 text += " " + Self.unknownTypeMarker
                 flags.insert(.unknownType)
             }
             if text.isEmpty {
-                skipped.append(SkippedMessage(date: date, reason: .emptyBody))
+                skipped.append(SkippedMessage(date: knownDate, reason: .emptyBody))
+                continue
+            }
+            if knownDate == nil {
+                skipped.append(SkippedMessage(date: nil, reason: .invalidDate))
                 continue
             }
             if isFromMe, (row["error"] as Int64? ?? 0) != 0 {
@@ -591,7 +614,7 @@ public struct Extractor: Sendable {
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                   AND m.item_type IN (1, 2, 3)
-                ORDER BY m.date, m.ROWID
+                ORDER BY \(Self.sortableDate), m.ROWID
                 """,
             arguments: StatementArguments(ids))
 
@@ -628,13 +651,10 @@ public struct Extractor: Sendable {
                 line = nil
             }
 
-            guard let line else { continue }
-            let dateNS: Int64 = row["date"] ?? 0
+            guard let line, let date = Self.appleDate(row["date"]) else { continue }
             events.append(
                 Transcript.SystemEvent(
-                    date: Date(
-                        timeIntervalSince1970: (Double(dateNS) / 1e9 + Self.appleEpochOffset)
-                            .rounded(.down)),
+                    date: Date(timeIntervalSince1970: date.timeIntervalSince1970.rounded(.down)),
                     line: line))
         }
         return events
