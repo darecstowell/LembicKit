@@ -16,12 +16,58 @@ public enum AttributedBody {
 
     static let fileTransferGUIDKey = "__kIMFileTransferGUIDAttributeName"
     static let audioTranscriptionKey = "IMAudioTranscription"
-    static let readKeys: Set<String> = [fileTransferGUIDKey, audioTranscriptionKey]
+    static let partKey = "__kIMMessagePartAttributeName"
+    static let readKeys: Set<String> = [fileTransferGUIDKey, audioTranscriptionKey, partKey]
+
+    /// A stretch of `text`, in UTF-16 units, and the attributes the engine reads.
+    struct Run: Equatable {
+        var length: Int
+        var attributes: [String: String]
+    }
 
     struct Body: Equatable {
         var text: String
+        var runs: [Run]
+
         /// The attributes on each U+FFFC of `text`, in order.
-        var objects: [[String: String]]
+        var objects: [[String: String]] {
+            var objects: [[String: String]] = []
+            var offset = 0
+            var runIndex = 0
+            var runEnd = runs.first?.length ?? 0
+            for unit in text.utf16 {
+                while runIndex < runs.count, offset >= runEnd {
+                    runIndex += 1
+                    runEnd += runIndex < runs.count ? runs[runIndex].length : 0
+                }
+                if unit == 0xFFFC {
+                    objects.append(runIndex < runs.count ? runs[runIndex].attributes : [:])
+                }
+                offset += 1
+            }
+            return objects
+        }
+
+        /// The body without the runs of the given message parts, or nil when no run
+        /// names its part, so the parts cannot be found.
+        func removingParts(_ parts: Set<Int>) -> Body? {
+            guard runs.contains(where: { $0.attributes[partKey] != nil }) else { return nil }
+            let source = text as NSString
+            var kept = ""
+            var keptRuns: [Run] = []
+            var offset = 0
+            for run in runs {
+                let end = min(offset + run.length, source.length)
+                let part = run.attributes[partKey].flatMap { Int($0) }
+                if offset < end, part.map(parts.contains) != true {
+                    kept += source.substring(with: NSRange(location: offset, length: end - offset))
+                    keptRuns.append(Run(length: end - offset, attributes: run.attributes))
+                }
+                offset = end
+            }
+            if offset < source.length { kept += source.substring(from: offset) }
+            return Body(text: kept, runs: keptRuns)
+        }
     }
 
     static func parse(_ data: Data) -> Body? {
@@ -29,22 +75,7 @@ public enum AttributedBody {
             let start = items.firstIndex(where: { bodyString($0) != nil }),
             let text = bodyString(items[start])
         else { return nil }
-        let runs = attributeRuns(items[(start + 1)...])
-        var objects: [[String: String]] = []
-        var offset = 0
-        var runIndex = 0
-        var runEnd = runs.first?.length ?? 0
-        for unit in text.utf16 {
-            while runIndex < runs.count, offset >= runEnd {
-                runIndex += 1
-                runEnd += runIndex < runs.count ? runs[runIndex].length : 0
-            }
-            if unit == 0xFFFC {
-                objects.append(runIndex < runs.count ? runs[runIndex].attributes : [:])
-            }
-            offset += 1
-        }
-        return Body(text: text, objects: objects)
+        return Body(text: text, runs: attributeRuns(items[(start + 1)...]))
     }
 
     /// The string from a blob the decoder rejects: the bytes after the first
@@ -106,10 +137,8 @@ public enum AttributedBody {
 
     /// Each run is an `(id, UTF-16 length)` pair, then its attribute dictionary.
     /// A run that reuses an earlier dictionary id carries no dictionary.
-    private static func attributeRuns(_ items: ArraySlice<Archivable>) -> [(
-        length: Int, attributes: [String: String]
-    )] {
-        var runs: [(length: Int, attributes: [String: String])] = []
+    private static func attributeRuns(_ items: ArraySlice<Archivable>) -> [Run] {
+        var runs: [Run] = []
         var dictionaries: [Int64: [String: String]] = [:]
         var current: Int64?
         var pendingKey: String?
@@ -120,7 +149,7 @@ public enum AttributedBody {
             {
                 current = id
                 pendingKey = nil
-                runs.append((Int(clamping: length), dictionaries[id] ?? [:]))
+                runs.append(Run(length: Int(clamping: length), attributes: dictionaries[id] ?? [:]))
                 continue
             }
             guard let id = current, case .object(_, let objects) = item else {

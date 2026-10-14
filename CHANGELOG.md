@@ -34,6 +34,13 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- An unsent message leaves a trace, and its text never surfaces. The extractor
+  reads the `rp` key of `message_summary_info` as well as `date_retracted`. A
+  fully unsent message is one `[unsent a message]` line
+  (`MessageRecord.Flags.unsent`). When only some parts were unsent, those parts
+  are cut from the body by their part runs and the line ends with
+  `[part of this message was unsent]` (`.partlyUnsent`). When the parts cannot
+  be found, the whole body is hidden (lembickit.md F23).
 - Every line break indents like a newline, and a NUL no longer cuts a message.
   `\r\n`, `\r`, U+2028, U+2029, and U+0085 become `\n`, other C0 controls
   except tab become a space, and the `text` column is read as bytes

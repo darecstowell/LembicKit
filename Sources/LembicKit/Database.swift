@@ -525,6 +525,7 @@ public final class ChatDatabase: @unchecked Sendable {
                 "associated_message_guid", "associated_message_emoji", "balloon_bundle_id",
                 "date_retracted", "payload_data", "group_action_type", "group_title",
                 "other_handle", "error", "is_sent", "schedule_type", "destination_caller_id",
+                "message_summary_info",
             ]
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),

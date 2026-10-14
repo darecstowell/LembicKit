@@ -28,8 +28,9 @@ struct TranscriptionTests {
                 [
                     "__kIMFileTransferGUIDAttributeName": "at_1_AAA",
                     "IMAudioTranscription": "This is a test",
+                    "__kIMMessagePartAttributeName": "1",
                 ],
-                [:],
+                ["__kIMMessagePartAttributeName": "2"],
             ])
         #expect(AttributedBody.decode(blob) == "Hi \u{FFFC} ok \u{FFFC}")
     }

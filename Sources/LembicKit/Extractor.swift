@@ -29,6 +29,10 @@ public struct MessageRecord: Sendable {
         public static let notDelivered = Flags(rawValue: 1 << 3)
         /// A Send Later message that has not gone out yet.
         public static let scheduled = Flags(rawValue: 1 << 4)
+        /// The sender unsent the message. The text is a marker only.
+        public static let unsent = Flags(rawValue: 1 << 5)
+        /// The sender unsent part of the message. That part is not shown.
+        public static let partlyUnsent = Flags(rawValue: 1 << 6)
     }
 
     /// Public memberwise initializer over every stored property. The extractor
@@ -254,9 +258,12 @@ public struct Extractor: Sendable {
         fallbackText: String?,
         balloonBundleID: String?,
         attachments: [AttachmentInfo],
-        payload: Data? = nil
+        payload: Data? = nil,
+        unsentParts: Set<Int> = []
     ) -> (text: String, hadAttachment: Bool, flags: MessageRecord.Flags) {
-        let (raw, objects, flags) = readBody(attributedBody, fallbackText: fallbackText)
+        let (raw, objects, flags) = readBody(
+            attributedBody, fallbackText: fallbackText, unsentParts: unsentParts)
+        if flags.contains(.unsent) { return (unsentMarker, false, flags) }
         let isAppMessage = !(balloonBundleID ?? "").isEmpty
         var unused = Array(attachments.indices)
         var hadAttachment = false
@@ -282,7 +289,8 @@ public struct Extractor: Sendable {
             }
             out += parts[i]
         }
-        let leftover = unused.compactMap { attachments[$0].placeholder }
+        let leftover =
+            flags.contains(.partlyUnsent) ? [] : unused.compactMap { attachments[$0].placeholder }
         if !leftover.isEmpty {
             hadAttachment = true
             out += " " + leftover.joined(separator: " ")
@@ -299,6 +307,7 @@ public struct Extractor: Sendable {
         } else if flags.contains(.incomplete) {
             out += " " + incompleteMarker
         }
+        if flags.contains(.partlyUnsent) { out += " " + partlyUnsentMarker }
         return (out, hadAttachment, flags)
     }
 
@@ -307,6 +316,17 @@ public struct Extractor: Sendable {
     static let unknownTypeMarker = "[unknown message type]"
     static let notDeliveredMarker = "[not delivered]"
     static let scheduledMarker = "[scheduled, not sent]"
+    static let unsentMarker = "[unsent a message]"
+    static let partlyUnsentMarker = "[part of this message was unsent]"
+
+    /// The part indexes `message_summary_info` lists as unsent (its `rp` key).
+    static func unsentParts(_ summaryInfo: Data?) -> Set<Int> {
+        guard let summaryInfo,
+            let plist = try? PropertyListSerialization.propertyList(from: summaryInfo, format: nil),
+            let parts = (plist as? [String: Any])?["rp"] as? [Any]
+        else { return [] }
+        return Set(parts.compactMap { ($0 as? NSNumber)?.intValue })
+    }
 
     /// A Send Later row (`schedule_type` 2) that has not been sent.
     static func isPendingScheduled(scheduleType: Int64?, isSent: Int64?) -> Bool {
@@ -315,9 +335,16 @@ public struct Extractor: Sendable {
 
     /// The body text and per-U+FFFC attributes. `attributedBody` wins when it
     /// decodes; otherwise the text column or a salvaged prefix is used and flagged.
-    static func readBody(_ blob: Data?, fallbackText: String?) -> (
+    static func readBody(_ blob: Data?, fallbackText: String?, unsentParts: Set<Int> = []) -> (
         text: String, objects: [[String: String]], flags: MessageRecord.Flags
     ) {
+        if !unsentParts.isEmpty {
+            // Without part runs the unsent text cannot be found, so nothing is shown.
+            guard let blob, let body = AttributedBody.parse(blob)?.removingParts(unsentParts),
+                !body.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return ("", [], .unsent) }
+            return (body.text, body.objects, .partlyUnsent)
+        }
         let fallback = fallbackText ?? ""
         guard let blob, !blob.isEmpty else { return (fallback, [], []) }
         if let body = AttributedBody.parse(blob) {
@@ -463,7 +490,8 @@ public struct Extractor: Sendable {
                        \(m("balloon_bundle_id")) balloon_bundle_id,
                        \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data,
                        \(m("error")) error, \(m("is_sent")) is_sent,
-                       \(m("schedule_type")) schedule_type
+                       \(m("schedule_type")) schedule_type,
+                       \(m("message_summary_info")) msi
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY \(Self.sortableDate), m.ROWID
@@ -532,15 +560,19 @@ public struct Extractor: Sendable {
 
             let itemType: Int64 = row["item_type"] ?? 0
             if Self.systemItemTypes.contains(itemType) { continue }
-            if (row["date_retracted"] as Int64? ?? 0) != 0 { continue }  // unsent
-
-            let payload: Data? = row["payload_data"]
-            var (text, hadAttachment, flags) = Self.renderText(
-                attributedBody: row["attributedBody"],
-                fallbackText: (row["text"] as Data?).map { String(decoding: $0, as: UTF8.self) },
-                balloonBundleID: row["balloon_bundle_id"],
-                attachments: attachmentMap[rowid] ?? [],
-                payload: payload)
+            let isRetracted = (row["date_retracted"] as Int64? ?? 0) != 0
+            let payload: Data? = isRetracted ? nil : row["payload_data"]
+            var (text, hadAttachment, flags) =
+                isRetracted
+                ? (Self.unsentMarker, false, MessageRecord.Flags.unsent)
+                : Self.renderText(
+                    attributedBody: row["attributedBody"],
+                    fallbackText: (row["text"] as Data?).map {
+                        String(decoding: $0, as: UTF8.self)
+                    },
+                    balloonBundleID: row["balloon_bundle_id"],
+                    attachments: attachmentMap[rowid] ?? [],
+                    payload: payload, unsentParts: Self.unsentParts(row["msi"]))
             if itemType != 0 {
                 guard !text.isEmpty, text != Self.unreadableMarker else {
                     skipped.append(SkippedMessage(date: knownDate, reason: .unknownType))
@@ -557,10 +589,11 @@ public struct Extractor: Sendable {
                 skipped.append(SkippedMessage(date: nil, reason: .invalidDate))
                 continue
             }
-            if isFromMe, (row["error"] as Int64? ?? 0) != 0 {
+            let canMark = isFromMe && !flags.contains(.unsent)
+            if canMark, (row["error"] as Int64? ?? 0) != 0 {
                 text += " " + Self.notDeliveredMarker
                 flags.insert(.notDelivered)
-            } else if isFromMe,
+            } else if canMark,
                 Self.isPendingScheduled(
                     scheduleType: row["schedule_type"], isSent: row["is_sent"])
             {

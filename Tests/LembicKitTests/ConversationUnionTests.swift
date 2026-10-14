@@ -44,8 +44,11 @@ struct ConversationUnionTests {
         let db = try Fixtures.openChatDB(populating: Fixtures.retractedSchemaAndData)
         let ex = Extractor(targetHandles: [3], handleLabels: [:])
         let recs = try db.queue.read { try ex.extractChat($0, chatID: 1) }
-        #expect(recs.map(\.guid) == ["kept"], "unsent (date_retracted != 0) row dropped")
-        #expect(recs.map(\.text) == ["still here"], "retracted body never surfaces")
+        #expect(recs.map(\.guid) == ["kept", "unsent"], "an unsend leaves a trace")
+        #expect(
+            recs.map(\.text) == ["still here", "[unsent a message]"],
+            "retracted body never surfaces")
+        #expect(recs.last?.flags == .unsent)
     }
 
     @Test func summariesAndGrouping() throws {
