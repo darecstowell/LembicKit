@@ -54,21 +54,35 @@ struct DetectorScan {
         profile.hasAny(needles) || (contextProfile?.hasAny(needles) ?? false)
     }
 
+    typealias Rule = (
+        category: SecretCategory, gate: @Sendable (DetectorScan) -> Bool,
+        run: @Sendable (inout DetectorScan) -> Void
+    )
+
+    /// The rules in run order. A gate only skips text its rule cannot match.
+    static let rules: [Rule] = [
+        (.creditCard, { $0.profile.digits >= 12 }, { $0.cards() }),
+        (.ssn, { $0.profile.digits >= 9 }, { $0.ssns() }),
+        (.bankAccount, { $0.profile.digits >= 6 }, { $0.bank() }),
+        (.idNumber, { $0.profile.digits >= 4 }, { $0.ids() }),
+        (.password, { _ in true }, { $0.passwords() }),
+        (.apiKey, { $0.profile.longestToken >= 12 || $0.profile.has("-----begin") }, { $0.keys() }),
+        (
+            .recoveryKey,
+            {
+                let p = $0.profile
+                return p.digits >= 4 || p.longestToken >= 16
+                    || (p.digits >= 1 && $0.hereOrBefore(Self.totpWords))
+            }, { $0.recoveryKeys() }
+        ),
+        (.seedPhrase, { $0.profile.bipRun >= 10 }, { $0.seeds() }),
+        (.standingCode, { $0.profile.digits >= 3 }, { $0.codes() }),
+    ]
+
     mutating func run() {
-        let p = profile
-        if enabled.contains(.creditCard), p.digits >= 12 { cards() }
-        if enabled.contains(.ssn), p.digits >= 9 { ssns() }
-        if enabled.contains(.bankAccount), p.digits >= 6 { bank() }
-        if enabled.contains(.idNumber), p.digits >= 4 { ids() }
-        if enabled.contains(.password) { passwords() }
-        if enabled.contains(.apiKey), p.longestToken >= 12 || p.has("-----begin") { keys() }
-        if enabled.contains(.recoveryKey),
-            p.digits >= 4 || p.longestToken >= 16 || (p.digits >= 1 && hereOrBefore(Self.totpWords))
-        {
-            recoveryKeys()
+        for rule in Self.rules where enabled.contains(rule.category) && rule.gate(self) {
+            rule.run(&self)
         }
-        if enabled.contains(.seedPhrase), p.bipRun >= 10 { seeds() }
-        if enabled.contains(.standingCode), p.digits >= 3 { codes() }
     }
 
     mutating func add(_ r: NSRange, _ category: SecretCategory) {
