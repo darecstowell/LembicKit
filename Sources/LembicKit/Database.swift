@@ -107,11 +107,10 @@ public final class ChatDatabase: @unchecked Sendable {
     /// The oldest and newest real message timestamps in `message`, as Dates, or
     /// nils when the table is empty. Used to detect an incomplete (sparse) local
     /// store — a Mac whose Messages-in-iCloud history hasn't synced has a recent
-    /// "oldest" floor. Filters out the date==0 sentinel rows so the floor is real.
+    /// "oldest" floor. Only known dates count (`Extractor.knownDate`), so the floor is real.
     public func messageDateBounds() throws -> (oldest: Date?, newest: Date?) {
         try read { db in
-            // One b-tree pass for the min/max of the real (date > 0) rows; the
-            // `date == 0` sentinel rows are excluded so the floor is a real message.
+            // One pass for the min/max of the known-date rows (sentinels and overflow excluded).
             let known = Extractor.knownDate("date")
             guard
                 let row = try Row.fetchOne(

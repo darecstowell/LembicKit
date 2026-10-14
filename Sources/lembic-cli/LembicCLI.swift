@@ -72,11 +72,10 @@ struct Export: ParsableCommand {
             throw ValidationError("--target-handles must contain at least one handle ROWID")
         }
 
-        // Route through the engine seam: this opens in place, PREFLIGHTS (the
-        // schema guard the old CLI skipped), and owns the read-only db for the run.
-        let exporter = try LembicKit.Export(chatDBAt: URL(fileURLWithPath: databasePath))
-        defer { exporter.close() }
-        let db = exporter.database
+        // Open in place, read-only, and preflight (the schema guard) before any read.
+        let db = try ChatDatabase(at: URL(fileURLWithPath: databasePath))
+        defer { db.cleanUp() }
+        try db.preflight()
 
         let counts = try db.counts()
         print(
@@ -92,8 +91,9 @@ struct Export: ParsableCommand {
             } else {
                 info = try ContactsMap.buildContactInfo()
             }
-            try exporter.useContacts(info?.names ?? [:])
         }
+        let exporter = LembicKit.Export(
+            database: db, contacts: contacts ? (info?.names ?? [:]) : nil)
         let listing = try Listing(database: db, contacts: info)
 
         if union {
@@ -266,6 +266,7 @@ struct Listing {
     /// speaker labels filled. A chat with no real message gets a bare 1:1 from the flags.
     func conversation(chatIDs: Set<Int64>, handles: Set<Int64>, number: String) -> Conversation {
         let count = chatIDs.reduce(0) { $0 + (counts[$1] ?? 0) }
+        // Chats that span two listed conversations take the first one's metadata.
         guard let base = conversations.first(where: { !$0.chatIDs.isDisjoint(with: chatIDs) })
         else {
             return Conversation(

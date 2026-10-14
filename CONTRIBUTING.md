@@ -25,6 +25,9 @@ swift build
 swift test
 ```
 
+The test target imports `lembic-cli` with `@testable`, so `swift test -c release`
+is not supported.
+
 There is a synthetic example database in `Examples/`, so you can run the CLI
 without Full Disk Access or any real data:
 

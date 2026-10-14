@@ -224,7 +224,9 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 - `lembic-cli export` (direct, `--union`, and `--sample`) renders the listed
   conversation through `Export.render`, so a note to self drops its echoes and a
   group chat gets per-speaker labels and the group header. With `--contacts` it
-  reads Contacts once and hands the names to the new `Export.useContacts(_:)`.
+  reads Contacts once and passes the names to `Export(database:contacts:)` (new
+  optional `contacts:` on both `Export` initializers). `--sample --contacts` now
+  reads Contacts too (a TCC prompt is possible) and prints resolved names.
 
 ### Performance
 

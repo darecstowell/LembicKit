@@ -36,14 +36,13 @@ struct CLIExportTests {
 
 @Suite("export contacts")
 struct ExportContactsTests {
-    /// Names handed to `useContacts` label the render; Contacts is not read again.
+    /// Names passed at init label the render; Contacts is not read again.
     @Test func useContactsLabelsTheRender() throws {
         let db = try Fixtures.openChatDB(populating: Fixtures.groupSchemaAndData)
         defer { db.cleanUp() }
         let list = try Conversations.list(from: db, resolvingContacts: false, region: "US")
         let group = try #require(list.first { $0.chatIDs.contains(10) })
-        let exporter = LembicKit.Export(database: db)
-        try exporter.useContacts(["+18160000003": "Alice Tan"])
+        let exporter = LembicKit.Export(database: db, contacts: ["+18160000003": "Alice Tan"])
         let txt = try #require(exporter.render(group, detect: false).txt)
         #expect(txt.contains("Alice Tan: Alice here"))
     }
