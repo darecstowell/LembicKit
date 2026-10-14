@@ -66,7 +66,8 @@ enum TextNormalizer {
         let (ascii, numberWords) = scan(source.utf16)
         if ascii, numberWords < 3 { return NormalizedText(identity: source as NSString) }
         let stage1 =
-            ascii ? NormalizedText(identity: source as NSString) : mapCharacters(source as NSString)
+            ascii || !source.unicodeScalars.contains(where: mayChange)
+            ? NormalizedText(identity: source as NSString) : mapCharacters(source as NSString)
         if !ascii, scan((stage1.text as String).utf16).numberWords < 3 { return stage1 }
         return spellDigits(stage1)
     }
@@ -74,28 +75,61 @@ enum TextNormalizer {
     private static let packedNumberWords: Set<UInt64> = Set(
         wordDigit.keys.map { $0.utf8.reduce(UInt64(0)) { $0 << 8 | UInt64($1) } })
 
-    /// One pass: is the text plain ASCII, and how many words are spelled digits.
+    /// One pass: is the text plain ASCII, and the longest run of spelled digits that
+    /// sit apart by at most 3 spaces, commas, or dashes (`spellDigits` needs 3).
     private static func scan(_ units: String.UTF16View) -> (ascii: Bool, numberWords: Int) {
         var ascii = true
-        var count = 0
+        var run = 0
+        var best = 0
         var packed: UInt64 = 0
         var length = 0
+        var gap = 0
+        var gapOK = true
         func endWord() {
-            if (2...5).contains(length), packedNumberWords.contains(packed) { count += 1 }
+            if (2...5).contains(length), packedNumberWords.contains(packed) {
+                run = run > 0 && gapOK && (1...3).contains(gap) ? run + 1 : 1
+                best = Swift.max(best, run)
+            } else {
+                run = 0
+            }
             packed = 0
             length = 0
+            gap = 0
+            gapOK = true
         }
         for c in units {
             if c >= 0x80 { ascii = false }
             if (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) {
                 packed = packed << 8 | UInt64(c | 0x20)
                 length += 1
-            } else if length > 0 {
-                endWord()
+            } else {
+                if length > 0 { endWord() }
+                gap += 1
+                if c != 0x20 && c != 0x2C && c != 0x2D { gapOK = false }
             }
         }
-        endWord()
-        return (ascii, count)
+        if length > 0 { endWord() }
+        return (ascii, best)
+    }
+
+    private static let spaces: Set<UInt32> = [
+        0x00A0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008,
+        0x2009, 0x200A, 0x202F, 0x205F, 0x3000,
+    ]
+
+    /// True when `mapCharacters` would change this scalar (no Unicode property lookups).
+    private static func mayChange(_ s: Unicode.Scalar) -> Bool {
+        let v = s.value
+        guard v >= 0x80 else { return false }
+        return dropped.contains(v) || dashes.contains(v) || spaces.contains(v)
+            || (v >= 0xFF01 && v <= 0xFF5E) || lookalikes[v] != nil || foldsToASCII[v] != nil
+            || isDigit(s)
+    }
+
+    private static func isDigit(_ s: Unicode.Scalar) -> Bool {
+        let v = s.value
+        return (v >= 0x2460 && v <= 0x2468) || v == 0x24EA || v == 0x24FF
+            || (v >= 0x2776 && v <= 0x277E) || CharacterSet.decimalDigits.contains(s)
     }
 
     private static func mapCharacters(_ ns: NSString) -> NormalizedText {
@@ -119,7 +153,9 @@ enum TextNormalizer {
             offset += width
             let v = scalar.value
             var emit: [UInt16]
-            if dropped.contains(v) {
+            if v < 0x80 {
+                emit = [UInt16(v)]
+            } else if dropped.contains(v) {
                 changed = true
                 if let last = map.last {
                     map[map.count - 1] = last.lowerBound..<src.upperBound
@@ -127,9 +163,7 @@ enum TextNormalizer {
                     pendingStart = src.lowerBound
                 }
                 continue
-            } else if v < 0x80 {
-                emit = [UInt16(v)]
-            } else if let digit = digitValue(scalar) {
+            } else if isDigit(scalar), let digit = digitValue(scalar) {
                 emit = [0x30 + UInt16(digit)]
                 changed = true
             } else if v >= 0xFF01 && v <= 0xFF5E {
@@ -138,7 +172,7 @@ enum TextNormalizer {
             } else if dashes.contains(v) {
                 emit = [0x2D]
                 changed = true
-            } else if scalar.properties.generalCategory == .spaceSeparator {
+            } else if spaces.contains(v) {
                 emit = [0x20]
                 changed = true
             } else if let latin = lookalikes[v], isLatin(i - 1) || isLatin(i + 1) {
