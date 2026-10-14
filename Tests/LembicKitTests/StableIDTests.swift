@@ -36,7 +36,8 @@ struct StableIDTests {
             summary(2, "maya@example.com", 4, guid: "iMessage;-;maya@example.com", date: 200),
         ]
         let merged = Conversations.group(
-            rows, contacts: ["+18160000001": "Maya", "maya@example.com": "Maya"])
+            rows, contacts: ["+18160000001": "Maya", "maya@example.com": "Maya"],
+            contactIDs: ["+18160000001": "card-maya", "maya@example.com": "card-maya"])
         #expect(merged.count == 1)
         #expect(merged.first?.id == "chat:iMessage;-;+18160000001")
         #expect(merged.first?.chatGUIDs.count == 2)

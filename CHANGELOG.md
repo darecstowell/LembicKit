@@ -31,6 +31,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Two different people with the same contact name no longer merge into one 1:1.
+  `Conversations.group` takes a `contactIDs:` map and keys each person by their
+  Contacts card, not by the name. A caller that passes only names gets one
+  conversation per identifier (lembickit.md F9, bugs.md #6).
 - Voice-note transcriptions show. A voice note with a transcription renders as
   `[audio: "This is a test"]` instead of `[audio]`. The decoder now reads the
   attribute runs after the message string (lembickit.md F8).

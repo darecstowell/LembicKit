@@ -229,7 +229,8 @@ public enum Conversations {
                     ContactsMap.normalizeHandle($0, defaultRegion: region)
                 })
         let oneToOnes = group(
-            summaries, contacts: names, handlesByIdentifier: handlesByIdentifier, region: region)
+            summaries, contacts: names, contactIDs: cards,
+            handlesByIdentifier: handlesByIdentifier, region: region)
 
         // Group chats (style=43): exact-participant-set stitched, then merged into
         // the same recency-sorted list. handleLabels lets the roster carry each
@@ -275,14 +276,14 @@ public enum Conversations {
     // MARK: - 1:1 multi-identifier union
 
     /// Pure grouping: fold raw per-chat summaries into people. No DB, no Contacts
-    /// I/O — `contacts` is the normalized-handle → name map (empty ⇒ every chat
-    /// stands alone as a bare identifier). Keyed by resolved contact name when
-    /// known (so phone + email merge), else by the normalized identifier (each
-    /// unknown number stands alone). Newest conversation first. This is the
-    /// engine's multi-identifier union and the unit-test seam.
+    /// I/O — `contacts` is the normalized-handle → name map, used for display only.
+    /// Keyed by Contacts card (`contactIDs`, so one card's phone + email merge),
+    /// else by the normalized identifier. Two cards with the same name stay two
+    /// conversations. Newest conversation first. This is the unit-test seam.
     public static func group(
         _ summaries: [ChatDatabase.ConversationSummary],
         contacts: [String: String],
+        contactIDs: [String: String] = [:],
         handlesByIdentifier: [String: Set<Int64>] = [:],
         region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
@@ -301,7 +302,7 @@ public enum Conversations {
             let ident = s.identifier ?? "h\(s.handleID)"
             let norm = ContactsMap.normalizeHandle(ident, defaultRegion: region)
             let name = contacts[norm]
-            let key = name ?? norm
+            let key = contactIDs[norm].map { "card:" + $0 } ?? norm
             var acc = groups[key] ?? Acc()
             acc.chatIDs.insert(s.chatID)
             acc.chatKeys.insert(chatKey(guid: s.guid, chatID: s.chatID))
@@ -317,7 +318,7 @@ public enum Conversations {
         }
         return
             groups
-            .map { key, a in
+            .map { _, a in
                 // Claim every handle ROWID sharing one of this person's normalized
                 // identifiers — not just the one each chat registered — so all of
                 // the counterparty's messages label as "Them". Without this, a
@@ -327,13 +328,13 @@ public enum Conversations {
                 for id in a.identifiers { handles.formUnion(handlesByIdentifier[id] ?? []) }
                 return Conversation(
                     id: stableID(a.chatKeys),
-                    displayName: a.name ?? key,
+                    displayName: a.name ?? a.number,
                     chatIDs: a.chatIDs,
                     targetHandles: handles,
                     identifiers: a.identifiers,
                     lastMessageDate: a.last,
                     messageCount: a.count,
-                    primaryIdentifier: a.number.isEmpty ? key : a.number,
+                    primaryIdentifier: a.number,
                     isContact: a.name != nil,
                     legacyIDs: a.identifiers.union(a.name.map { [$0] } ?? []),
                     chatGUIDs: a.chatKeys)
