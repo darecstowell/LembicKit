@@ -122,8 +122,8 @@ struct SecretScrubberTests {
             scrubbedSlices("your order #1234567 shipped", [.otp]).isEmpty,
             "order #1234567 → an order number, NOT an OTP")
         #expect(
-            scrubbedSlices("your code #123456 ok", [.otp]).isEmpty,
-            "a bare # code form is no longer scrubbed (issue/order false positives)")
+            scrubbedSlices("your code #123456 ok", [.otp]) == ["123456"],
+            "\"your code\" is a sign-in cue, so the code after it is removed")
 
         // Precision floor: bare digits, a 5-digit ZIP, a 4-digit year are NOT
         // scrubbed (we're auto-deleting — never nuke a year/zip/amount).
