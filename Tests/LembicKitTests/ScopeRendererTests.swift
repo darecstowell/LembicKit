@@ -213,6 +213,37 @@ struct ScopeRendererTests {
         #expect(throws: CancellationError.self) { try renderer.render() }
     }
 
+    @Test("a cancelled task drops its render, and the renderer keeps working")
+    func cancelTask() async throws {
+        let records = ScopeFixtures.thread(count: 300, seed: 21)
+        let renderer = Export.ScopeRenderer(records: records, number: "x")
+        let first = try renderer.render(scope: Export.Scope(enabledDetectors: [.apiKey]))
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try renderer.render()
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        let again = try renderer.render(scope: Export.Scope(enabledDetectors: [.apiKey]))
+        #expect(Self.dump(again) == Self.dump(first))
+        #expect(
+            Self.dump(try renderer.render())
+                == Self.dump(Export.render(records: records, number: "x")))
+    }
+
+    @Test("more category sets than the memo keeps still render the same")
+    func manySets() throws {
+        let records = ScopeFixtures.thread(count: 200, seed: 22)
+        let renderer = Export.ScopeRenderer(records: records, number: "x")
+        let sets = SecretCategory.allCases.map { Set([$0]) } + [Set(SecretCategory.allCases)]
+        for enabled in sets + sets {
+            let scope = Export.Scope(
+                dateRange: records[50].date...records[150].date, enabledDetectors: enabled)
+            #expect(
+                Self.dump(try renderer.render(scope: scope))
+                    == Self.dump(Export.render(records: records, number: "x", scope: scope)))
+        }
+    }
+
     @Test("the empty render result is empty")
     func emptyResult() {
         let empty = Transcript.RenderResult.empty

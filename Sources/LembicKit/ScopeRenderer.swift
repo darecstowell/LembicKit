@@ -1,9 +1,9 @@
 import Foundation
 
 extension Export {
-    /// One extracted conversation, kept for fast re-renders as the scope changes.
-    /// `render(formats:scope:redactions:detect:)` returns exactly what
-    /// `Export.render(records:...)` returns, but finds detector and scrubber hits once.
+    /// One extracted conversation, kept for fast re-renders as the scope changes. Each
+    /// render equals `Export.render(records:...)`; the first one per category set scans
+    /// the whole thread, so it costs more than one `Export.render` of a small scope.
     public final class ScopeRenderer: @unchecked Sendable {
         private let records: [MessageRecord]
         private let number: String
@@ -17,11 +17,13 @@ extension Export {
 
         private let lock = NSLock()
         private var input: DetectorInput?
-        private var detections: [Set<SecretCategory>: DetectionMemo] = [:]
-        private var scrubs: [Set<ScrubberCategory>: [[Range<Int>]]] = [:]
+        private var detections = RecentCache<Set<SecretCategory>, DetectionMemo>()
+        private var scrubs = RecentCache<Set<ScrubberCategory>, [[Range<Int>]]>()
         private let stop = StopFlag()
 
         /// The same inputs `Export.render(records:...)` takes, less the per-render ones.
+        /// Records out of date order get no memo: each render runs a full pass, and a
+        /// cancel is seen only before and after it.
         public init(
             records: [MessageRecord], number: String,
             group: Transcript.GroupRenderInfo? = nil,
@@ -54,14 +56,28 @@ extension Export {
             self.isSorted = zip(records, records.dropFirst()).allSatisfy { $0.date <= $1.date }
         }
 
-        /// Stops a detector or scrubber pass in progress. Later renders throw.
+        /// Shuts the renderer down: a pass in progress stops and every later render throws.
         public func cancel() { stop.set() }
 
-        /// `Export.render(records:...)` for one scope. Throws `CancellationError`
-        /// after `cancel()`.
+        /// `Export.render(records:...)` for one scope. Throws `CancellationError` when its
+        /// task or the renderer is cancelled; memos already built stay. A first pass holds
+        /// a lock, so a render that needs another category set waits for it.
         public func render(
             formats: Set<Format> = [.txt], scope: Scope = .all,
             redactions: RedactionSet = RedactionSet(), detect: Bool = true
+        ) throws -> Rendered {
+            try withUnsafeCurrentTask { task in
+                // The task outlives this call, so its cancel flag is safe to poll from workers.
+                let call = StopFlag(parent: stop, task: task.map(TaskProbe.init))
+                return try render(
+                    formats: formats, scope: scope, redactions: redactions, detect: detect,
+                    stop: call)
+            }
+        }
+
+        private func render(
+            formats: Set<Format>, scope: Scope, redactions: RedactionSet, detect: Bool,
+            stop: StopFlag
         ) throws -> Rendered {
             if stop.isSet { throw CancellationError() }
             var scope = scope
@@ -83,7 +99,7 @@ extension Export {
                         return SecretDetector.detect(in: filtered, enabled: scope.enabledDetectors)
                     }
                     do {
-                        return try detected(in: bounds, enabled: scope.enabledDetectors)
+                        return try detected(in: bounds, enabled: scope.enabledDetectors, stop: stop)
                     } catch {
                         failure = error
                         return []
@@ -92,13 +108,15 @@ extension Export {
                 scrubbed: {
                     guard let bounds else { return Export.scrubbed(filtered, scope: scope) }
                     do {
-                        return try scrubbed(in: bounds, categories: scope.enabledScrubbers)
+                        return try scrubbed(
+                            in: bounds, categories: scope.enabledScrubbers, stop: stop)
                     } catch {
                         failure = error
                         return RedactionSet()
                     }
                 })
             if let failure { throw failure }
+            if stop.isSet { throw CancellationError() }
             return rendered
         }
 
@@ -123,22 +141,24 @@ extension Export {
 
         // MARK: - Memoized detectors and scrubbers
 
-        private func detected(in bounds: Range<Int>, enabled: Set<SecretCategory>) throws
+        private func detected(
+            in bounds: Range<Int>, enabled: Set<SecretCategory>, stop: StopFlag
+        ) throws
             -> [DetectedSecret]
         {
             guard !enabled.isEmpty, !bounds.isEmpty else { return [] }
             let (memo, input) = try lock.withLock { () throws -> (DetectionMemo, DetectorInput) in
-                let input = try self.input ?? buildInput()
+                let input = try self.input ?? buildInput(stop: stop)
                 self.input = input
-                if let memo = detections[enabled] { return (memo, input) }
+                if let memo = detections.value(for: enabled) { return (memo, input) }
                 let memo = try DetectionMemo(input, enabled: enabled, stop: stop)
-                detections[enabled] = memo
+                detections.insert(memo, for: enabled)
                 return (memo, input)
             }
             return memo.detected(in: bounds, input: input, enabled: enabled)
         }
 
-        private func buildInput() throws -> DetectorInput {
+        private func buildInput(stop: StopFlag) throws -> DetectorInput {
             let records = self.records
             let parts = try parallelMap(records.count, stop: stop) {
                 i -> (NormalizedText?, TextProfile?) in
@@ -150,13 +170,15 @@ extension Export {
                 records: records, bodies: parts.map(\.0), profiles: parts.map(\.1), gated: true)
         }
 
-        private func scrubbed(in bounds: Range<Int>, categories: Set<ScrubberCategory>) throws
+        private func scrubbed(
+            in bounds: Range<Int>, categories: Set<ScrubberCategory>, stop: StopFlag
+        ) throws
             -> RedactionSet
         {
             var set = RedactionSet()
             guard !categories.isEmpty, !bounds.isEmpty else { return set }
             let ranges = try lock.withLock { () throws -> [[Range<Int>]] in
-                if let ranges = scrubs[categories] { return ranges }
+                if let ranges = scrubs.value(for: categories) { return ranges }
                 let records = self.records
                 let ranges = try parallelMap(records.count, stop: stop) { i in
                     records[i].guid == nil
@@ -164,7 +186,7 @@ extension Export {
                         : SecretScrubber.ranges(
                             in: records[i].text as NSString, categories: categories)
                 }
-                scrubs[categories] = ranges
+                scrubs.insert(ranges, for: categories)
                 return ranges
             }
             for i in bounds {
@@ -263,10 +285,42 @@ private struct ParallelSlots<T>: @unchecked Sendable {
     let buffer: UnsafeMutableBufferPointer<T?>
 }
 
-/// A flag one thread sets and others read.
+/// A stop flag; it also reads as set when its parent is set or its task is cancelled.
 final class StopFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
+    private let parent: StopFlag?
+    private let task: TaskProbe?
+    init(parent: StopFlag? = nil, task: TaskProbe? = nil) {
+        self.parent = parent
+        self.task = task
+    }
     func set() { lock.withLock { value = true } }
-    var isSet: Bool { lock.withLock { value } }
+    var isSet: Bool {
+        lock.withLock { value } || (task?.task.isCancelled ?? false) || (parent?.isSet ?? false)
+    }
+}
+
+/// The calling task, read only while that task's synchronous render runs.
+struct TaskProbe: @unchecked Sendable {
+    let task: UnsafeCurrentTask
+}
+
+/// The few most recently used values; the oldest is dropped past `limit`.
+struct RecentCache<Key: Hashable, Value> {
+    private var entries: [(key: Key, value: Value)] = []
+    let limit = 4
+
+    mutating func value(for key: Key) -> Value? {
+        guard let i = entries.firstIndex(where: { $0.key == key }) else { return nil }
+        let entry = entries.remove(at: i)
+        entries.append(entry)
+        return entry.value
+    }
+
+    mutating func insert(_ value: Value, for key: Key) {
+        entries.removeAll { $0.key == key }
+        entries.append((key, value))
+        if entries.count > limit { entries.removeFirst() }
+    }
 }

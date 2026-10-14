@@ -100,10 +100,9 @@ struct DetectorInput: @unchecked Sendable {
 
     // MARK: - Secrets split over messages
 
-    /// Up to four messages in a row from one sender, each within five minutes of the
-    /// one before, are joined with a space, and the card, SSN, IBAN, and seed rules run
-    /// on the joined text. A hit maps back to every message it touches. `end` is one
-    /// past the last record the join read.
+    /// Joins up to four short sends from one sender (each within five minutes) and runs
+    /// the card, SSN, IBAN, and seed rules on them. `end` is where the join stopped:
+    /// it may read `records[end]`, but a scope that ends at `end` stops in the same place.
     func joined(_ start: Int, in bounds: Range<Int>, enabled: Set<SecretCategory>)
         -> (end: Int, hits: [DetectedSecret])
     {
@@ -197,10 +196,8 @@ struct DetectorInput: @unchecked Sendable {
 
     // MARK: - Private key blocks split over messages
 
-    /// A private key whose END line is not in the BEGIN message: flag the next
-    /// messages from the same sender, whole, through the one with the END line
-    /// (at most 20 messages, each within 10 minutes of the one before). `last` is
-    /// the last record read.
+    /// A key block with no END line: flags the sender's next messages (up to 20, each
+    /// within 10 minutes) through the END line. `last` is the last record read.
     func keyBlock(_ i: Int, upTo hi: Int) -> (last: Int, hits: [DetectedSecret]) {
         let r = records[i]
         guard profiles[i]?.has("-----begin") ?? false,
