@@ -375,7 +375,8 @@ extension Export {
         return MessageRecord(
             guid: record.guid, date: record.date, speaker: speaker,
             isTarget: record.isTarget, service: record.service, text: text,
-            hadAttachment: record.hadAttachment, reactions: reactions)
+            hadAttachment: record.hadAttachment, reactions: reactions,
+            isInvisibleInk: record.isInvisibleInk)
     }
 
     /// `records` with identifier speaker labels and reaction authors made neutral

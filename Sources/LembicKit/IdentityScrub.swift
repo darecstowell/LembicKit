@@ -86,7 +86,7 @@ struct IdentityScrub: Sendable {
             return MessageRecord(
                 guid: r.guid, date: r.date, speaker: speaker, isTarget: r.isTarget,
                 service: r.service, text: r.text, hadAttachment: r.hadAttachment,
-                reactions: reactions)
+                reactions: reactions, isInvisibleInk: r.isInvisibleInk)
         }
     }
 

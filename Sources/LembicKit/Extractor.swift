@@ -12,6 +12,8 @@ public struct MessageRecord: Sendable {
     public let text: String
     public let hadAttachment: Bool
     public var reactions: [Reaction]
+    /// Sent with the Invisible Ink effect; the detector flags the whole message.
+    public let isInvisibleInk: Bool
 
     /// Public memberwise initializer over every stored property. The extractor
     /// builds records from `chat.db` rows, but a public init also lets callers
@@ -25,7 +27,8 @@ public struct MessageRecord: Sendable {
         service: String?,
         text: String,
         hadAttachment: Bool,
-        reactions: [Reaction]
+        reactions: [Reaction],
+        isInvisibleInk: Bool = false
     ) {
         self.guid = guid
         self.date = date
@@ -35,6 +38,7 @@ public struct MessageRecord: Sendable {
         self.text = text
         self.hadAttachment = hadAttachment
         self.reactions = reactions
+        self.isInvisibleInk = isInvisibleInk
     }
 }
 
@@ -210,6 +214,8 @@ public struct Extractor: Sendable {
         return lines.joined(separator: "\n").trimmingCharacters(in: pythonWhitespace)
     }
 
+    static let invisibleInkEffect = "com.apple.MobileSMS.expressivesend.invisibleink"
+
     static func collapseSpaceRuns(_ s: String) -> String {
         var out = ""
         out.reserveCapacity(s.count)
@@ -262,13 +268,17 @@ public struct Extractor: Sendable {
         var sequence = 0
 
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        // Optional: an older chat.db without the send effect column still exports.
+        let effect =
+            try ChatDatabase.hasColumns(["expressive_send_style_id"], inTable: "message", db: db)
+            ? ", m.expressive_send_style_id effect" : ""
         let rows = try Row.fetchCursor(
             db,
             sql: """
                 SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id, m.service,
                        m.text, m.attributedBody, m.item_type,
                        m.associated_message_type amt, m.associated_message_guid amg,
-                       m.associated_message_emoji ame, m.balloon_bundle_id, m.date_retracted
+                       m.associated_message_emoji ame, m.balloon_bundle_id, m.date_retracted\(effect)
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY m.date, m.ROWID
@@ -331,7 +341,8 @@ public struct Extractor: Sendable {
                 service: row["service"],
                 text: text,
                 hadAttachment: hadAttachment,
-                reactions: [])
+                reactions: [],
+                isInvisibleInk: (row["effect"] as String?) == Self.invisibleInkEffect)
             if let guid { indexByGUID[guid] = emitted.count }
             emitted.append(record)
         }

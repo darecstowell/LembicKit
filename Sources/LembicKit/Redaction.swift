@@ -89,7 +89,8 @@ public struct RedactionSet: Sendable, Equatable {
 /// "flag for review" detectors round out the set:
 /// `seedPhrase` (BIP-39 checksum), `apiKey` (curated prefixed token formats),
 /// `standingCode` (door/gate/PIN keyword-proximity), and `bankAccount` (IBAN
-/// mod-97 + US ABA routing). 2FA/OTP codes and PII are handled separately
+/// mod-97 + US ABA routing, plus account numbers near a keyword). `idNumber`,
+/// `recoveryKey`, and `invisibleInk` complete the set. 2FA/OTP codes and PII are handled separately
 /// (they ship as opt-in auto-remove *scrubbers*, not flag-for-review
 /// detectors).
 public enum SecretCategory: String, Sendable, CaseIterable, Hashable {
@@ -100,6 +101,12 @@ public enum SecretCategory: String, Sendable, CaseIterable, Hashable {
     case apiKey
     case standingCode
     case bankAccount
+    /// Passport, driver's license, national ID, and health ID numbers.
+    case idNumber
+    /// Account recovery keys, 2FA backup codes, and authenticator (TOTP) secrets.
+    case recoveryKey
+    /// A message sent with the Invisible Ink effect: the sender meant to hide it.
+    case invisibleInk
 }
 
 /// The opt-in **scrubber** categories. Unlike
@@ -113,10 +120,9 @@ public enum SecretCategory: String, Sendable, CaseIterable, Hashable {
 ///
 /// `phone` and `postalAddress` ride Apple's on-device `NSDataDetector`; `email`
 /// uses a standard RFC-ish address regex (NSDataDetector misses bare emails);
-/// `otp` matches only high-precision 2FA forms (machine-readable `#123456` /
-/// `G-123456`, or a strong-cue "verification/security/login code is NNNNNN"
-/// phrase) — bare digit runs are deliberately NOT scrubbed (a year/zip/amount
-/// would be nuked). Name-anonymization is NOT a scrubber category — it rides the
+/// `otp` matches only sign-in code forms (a code next to a sign-in cue, the
+/// code-first form, the domain-bound form, `G-123456`); bare digit runs are
+/// never removed. Name-anonymization is NOT a scrubber category — it rides the
 /// existing `anonymizeSpeakers` transform (output = a `PN` alias, not
 /// `[redacted]`).
 public enum ScrubberCategory: String, Sendable, CaseIterable, Hashable {
