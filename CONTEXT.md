@@ -60,6 +60,7 @@ These are the core nouns, drawn from the actual type names.
 | `Transcript.swift` | Render `.txt` and `.jsonl`; redaction splice; anonymization; render marks for the app | `Transcript.compactText`, `Transcript.jsonLines`, `Transcript.redactedText`, `Transcript.renderedBody`, `RenderResult`, `RenderSpan`, `RedactedMark`, `HighlightMark`, `TrimOptions`, `GroupRenderInfo`, `SystemEvent` |
 | `Export.swift` | The single extract-detect-render pipeline seam, plus prepared-record helpers for alternate output formats | `Export`, `Export.render`, `Export.Scope`, `Export.Format`, `Export.Rendered`, `records`, `preparedRecords`, `effectiveRedactions`, `preparedRedactedRecords` |
 | `Redaction.swift` | Redaction value types and the category enums | `Redaction`, `RedactionSet`, `SecretCategory`, `ScrubberCategory`, `DetectedSecret` |
+| `QuoteReactions.swift` | Moves a quoted message's redactions onto an SMS/RCS tapback that quotes it (`Loved “…”`) | `QuoteReactions` (internal, called from `Export.effectiveRedactions`) |
 | `RedactionAnchor.swift` | Saved redactions with a keyed fingerprint of the covered text, so a changed message moves the anchor or hides the whole message | `RedactionAnchor`, `RedactionSet.anchors(in:key:)`, `RedactionSet.resolve(_:records:key:)` |
 | `RedactionMap.swift` | Source-to-output UTF-16 offset map for one message body | `OffsetMap` (internal) |
 | `SecretDetector.swift` | On-device detection of high-harm secrets (flag for review) | `SecretDetector.detect` |

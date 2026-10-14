@@ -250,4 +250,45 @@ struct RedactionLeakTests {
             #expect(!txt.contains(value), "\(text) leaks after Redact All")
         }
     }
+
+    // MARK: - F11: quote reactions carry the quoted message's redactions
+
+    @Test("a reaction that quotes a redacted message hides the quote in every output")
+    func quoteReactionCarriesWholeRedaction() {
+        let rs = [
+            rec("q1", 0, "Them", "the biopsy came back and it is stage 2"),
+            rec("q2", 1, "Me", "Emphasized \u{201C}the biopsy came back and it is stage 2\u{201D}"),
+        ]
+        var set = RedactionSet()
+        set.add(Redaction(guid: "q1", range: nil))
+        let out = Export.render(
+            records: rs, number: "x", formats: [.txt, .jsonl], redactions: set)
+        #expect(!(out.txt ?? "").contains("biopsy") && !(out.jsonl ?? "").contains("biopsy"))
+        let pro = Export.preparedRedactedRecords(rs, scope: .all, redactions: set)
+        #expect(pro.isEmpty)
+    }
+
+    @Test("span redactions move onto the quote, also for truncated and emoji quotes")
+    func quoteReactionCarriesSpans() {
+        let long = "the gate code is 4471 and the alarm is off until we get back on Sunday night"
+        let rs = [
+            rec("c1", 0, "Them", "the gate code is 4471"),
+            rec("c2", 1, "Me", "Loved \u{201C}the gate code is 4471\u{201D}"),
+            rec("c3", 2, "Them", long),
+            rec("c4", 3, "Me", "Liked \u{201C}the gate code is 4471 and the alarm\u{2026}\u{201D}"),
+            rec("c5", 4, "Me", "Reacted \u{1F511} to \"the gate code is 4471\""),
+            rec("c6", 5, "Me", "Loved \u{201C}see you soon\u{201D}"),
+        ]
+        var set = RedactionSet()
+        set.add(Redaction(guid: "c1", range: 17..<21))
+        set.add(Redaction(guid: "c3", range: 17..<21))
+        let txt =
+            Export.render(records: rs, number: "x", formats: [.txt], redactions: set).txt ?? ""
+        #expect(!txt.contains("4471"))
+        #expect(txt.contains("Loved \u{201C}the gate code is [redacted]\u{201D}"))
+        #expect(
+            txt.contains("Liked \u{201C}the gate code is [redacted] and the alarm\u{2026}\u{201D}"))
+        #expect(txt.contains("Reacted \u{1F511} to \"the gate code is [redacted]\""))
+        #expect(txt.contains("Loved \u{201C}see you soon\u{201D}"))
+    }
 }

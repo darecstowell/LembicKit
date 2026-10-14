@@ -396,18 +396,18 @@ extension Export {
     /// format in cleartext while another shows `[redacted]`.
     ///
     /// `records` MUST be the already-date-filtered slice (the same set the renderer
-    /// sees), so the scrubber scans exactly what is rendered. With
-    /// `scope.enabledScrubbers` empty (the default) this returns `manual` unchanged,
-    /// so today's bytes are reproduced.
+    /// sees), so the scrubber scans exactly what is rendered. A reaction message that
+    /// quotes a redacted message (`Loved “…”`) gets the same redactions on the quote.
     public static func effectiveRedactions(
         manual: RedactionSet, records: [MessageRecord], scope: Scope
     ) -> RedactionSet {
-        guard !scope.enabledScrubbers.isEmpty else { return manual }
         var effective = manual
-        for r in SecretScrubber.scrub(in: records, categories: scope.enabledScrubbers).all {
-            effective.add(r)
+        if !scope.enabledScrubbers.isEmpty {
+            for r in SecretScrubber.scrub(in: records, categories: scope.enabledScrubbers).all {
+                effective.add(r)
+            }
         }
-        return effective
+        return QuoteReactions.carryRedactions(effective, records: records)
     }
 
     /// The fully-prepared, fully-redacted record set for downstream formatters
