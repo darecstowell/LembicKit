@@ -32,6 +32,9 @@ public enum ContactsMap {
     public struct ContactInfo: Sendable {
         public let names: [String: String]
         public let avatars: [String: Data]
+        /// Normalized handle to `CNContact.identifier`. Two handles on one card are
+        /// one person; two cards with the same name are not.
+        public let contactIDs: [String: String]
     }
 
     public static func buildContactInfo() throws -> ContactInfo {
@@ -66,12 +69,11 @@ public enum ContactsMap {
             ] as [CNKeyDescriptor]
         let request = CNContactFetchRequest(keysToFetch: keys)
 
-        var names: [String: String] = [:]
-        var avatars: [String: Data] = [:]
+        var maps = Maps()
         try CNContactStore().enumerateContacts(with: request) { contact, _ in
-            record(contact, photo: contact.thumbnailImageData, into: &names, &avatars)
+            record(contact, photo: contact.thumbnailImageData, into: &maps)
         }
-        return ContactInfo(names: names, avatars: avatars)
+        return maps.info
     }
 
     /// Build the same maps from a vCard file instead of the system store — the
@@ -83,31 +85,39 @@ public enum ContactsMap {
 
     public static func buildContactInfo(vcardData data: Data) throws -> ContactInfo {
         let contacts = try CNContactVCardSerialization.contacts(with: data)
-        var names: [String: String] = [:]
-        var avatars: [String: Data] = [:]
+        var maps = Maps()
         for contact in contacts {
             let photo = contact.isKeyAvailable(CNContactImageDataKey) ? contact.imageData : nil
-            record(contact, photo: photo, into: &names, &avatars)
+            record(contact, photo: photo, into: &maps)
         }
-        return ContactInfo(names: names, avatars: avatars)
+        return maps.info
+    }
+
+    private struct Maps {
+        var names: [String: String] = [:]
+        var avatars: [String: Data] = [:]
+        var contactIDs: [String: String] = [:]
+        var info: ContactInfo {
+            ContactInfo(names: names, avatars: avatars, contactIDs: contactIDs)
+        }
     }
 
     /// Fold one contact's name + photo into the maps under each of its normalized
     /// handles (phone or email). `photo` is supplied by the caller because the
     /// store path uses the thumbnail while the vCard path uses full image data;
     /// otherwise the two paths share this exact name/handle logic.
-    private static func record(
-        _ contact: CNContact, photo: Data?,
-        into names: inout [String: String], _ avatars: inout [String: Data]
-    ) {
+    private static func record(_ contact: CNContact, photo: Data?, into maps: inout Maps) {
         let personal = [contact.givenName, contact.familyName]
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         let name = personal.isEmpty ? contact.organizationName : personal
         guard !name.isEmpty else { return }
         func put(_ key: String) {  // first write wins per handle
-            if names[key] == nil { names[key] = name }
-            if let photo, avatars[key] == nil { avatars[key] = photo }
+            if maps.names[key] == nil {
+                maps.names[key] = name
+                maps.contactIDs[key] = contact.identifier
+            }
+            if let photo, maps.avatars[key] == nil { maps.avatars[key] = photo }
         }
         for phone in contact.phoneNumbers {
             if let normalized = normalizePhone(phone.value.stringValue) { put(normalized) }

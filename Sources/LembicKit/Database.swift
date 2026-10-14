@@ -272,11 +272,15 @@ public final class ChatDatabase: @unchecked Sendable {
         public let participantHandles: [Int64]  // sorted handle ROWIDs (the set key)
         /// `chat.guid`: stable across renames, Contacts changes, and member changes.
         public let guid: String?
+        /// `chat.group_id`: chats that share one are the same group.
+        public let groupID: String?
+        /// The oldest real message, or nil when unknown.
+        public let firstMessageDate: Date?
 
         public init(
             chatID: Int64, identifier: String?, service: String?, displayName: String?,
             lastMessageDate: Date, messageCount: Int, participantHandles: [Int64],
-            guid: String? = nil
+            guid: String? = nil, groupID: String? = nil, firstMessageDate: Date? = nil
         ) {
             self.chatID = chatID
             self.identifier = identifier
@@ -286,6 +290,8 @@ public final class ChatDatabase: @unchecked Sendable {
             self.messageCount = messageCount
             self.participantHandles = participantHandles
             self.guid = guid
+            self.groupID = groupID
+            self.firstMessageDate = firstMessageDate
         }
     }
 
@@ -324,6 +330,8 @@ public final class ChatDatabase: @unchecked Sendable {
                            \(cols.column("c", "chat", "service_name")) svc,
                            \(cols.column("c", "chat", "display_name")) dname,
                            \(cols.column("c", "chat", "guid")) cguid,
+                           \(cols.column("c", "chat", "group_id")) gid,
+                           MIN(CASE WHEN m.date > 0 THEN m.date END) firstDate,
                            MAX(m.date) lastDate, COUNT(*) cnt
                     FROM chat c
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
@@ -336,6 +344,7 @@ public final class ChatDatabase: @unchecked Sendable {
                 let ns: Int64 = row["lastDate"] ?? 0
                 let cid: Int64 = row["cid"]
                 let name = (row["dname"] as String?).flatMap { $0.isEmpty ? nil : $0 }
+                let firstNS: Int64? = row["firstDate"]
                 return GroupConversationSummary(
                     chatID: cid,
                     identifier: row["ident"],
@@ -345,8 +354,54 @@ public final class ChatDatabase: @unchecked Sendable {
                         timeIntervalSince1970: Double(ns) / 1e9 + Extractor.appleEpochOffset),
                     messageCount: row["cnt"] ?? 0,
                     participantHandles: (rosters[cid] ?? []).sorted(),
-                    guid: row["cguid"])
+                    guid: row["cguid"],
+                    groupID: row["gid"],
+                    firstMessageDate: firstNS.map {
+                        Date(timeIntervalSince1970: Double($0) / 1e9 + Extractor.appleEpochOffset)
+                    })
             }
+        }
+    }
+
+    /// Handle ROWID to `handle.person_centric_id`: Apple's link between the
+    /// handles of one person. Empty when the column is missing.
+    public func personCentricIDs() throws -> [Int64: String] {
+        try read { db in
+            let cols = try SchemaColumns.load(db, tables: ["handle"])
+            guard cols.has("handle", "person_centric_id") else { return [:] }
+            var map: [Int64: String] = [:]
+            let rows = try Row.fetchCursor(
+                db,
+                sql: """
+                    SELECT ROWID, person_centric_id pcid FROM handle
+                    WHERE person_centric_id IS NOT NULL AND person_centric_id != ''
+                    """)
+            while let row = try rows.next() { map[row["ROWID"]] = row["pcid"] }
+            return map
+        }
+    }
+
+    /// Group chat ROWID to its `chat_lookup` identifiers (macOS 26). Group chats
+    /// that share one are the same thread split across services. Empty when the
+    /// table is missing.
+    public func groupChatLinks() throws -> [Int64: Set<String>] {
+        try read { db in
+            let cols = try SchemaColumns.load(db, tables: ["chat_lookup"])
+            guard cols.has("chat_lookup", "chat"), cols.has("chat_lookup", "identifier") else {
+                return [:]
+            }
+            var links: [Int64: Set<String>] = [:]
+            let rows = try Row.fetchCursor(
+                db,
+                sql: """
+                    SELECT cl.chat cid, cl.identifier ident FROM chat_lookup cl
+                    JOIN chat c ON c.ROWID = cl.chat
+                    WHERE c.style = 43 AND cl.identifier IS NOT NULL AND cl.identifier != ''
+                    """)
+            while let row = try rows.next() {
+                links[row["cid"], default: []].insert(row["ident"])
+            }
+            return links
         }
     }
 
@@ -415,7 +470,8 @@ public final class ChatDatabase: @unchecked Sendable {
     /// Columns read when present. A missing one degrades one feature (a NULL is
     /// selected in its place), never the whole export. Keep in lockstep with the SQL.
     public static let optionalSchema: [(table: String, columns: [String])] = [
-        ("chat", ["guid", "chat_identifier", "service_name", "display_name"]),
+        ("chat", ["guid", "chat_identifier", "service_name", "display_name", "group_id"]),
+        ("handle", ["person_centric_id"]),
         (
             "message",
             [
@@ -426,6 +482,7 @@ public final class ChatDatabase: @unchecked Sendable {
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),
         ("attachment", ["mime_type", "uti", "transfer_name"]),
+        ("chat_lookup", ["chat", "identifier"]),
     ]
 
     /// Every missing core table or column. Empty means the engine can read the

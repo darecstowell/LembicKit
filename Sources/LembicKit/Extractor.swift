@@ -92,8 +92,10 @@ public struct Extractor: Sendable {
         var perSpeaker = globalLabels
         var rosterHandles = Set<Int64>()
         for p in conversation.participants where p.label != nil {
-            perSpeaker[p.handleID] = p.label
-            rosterHandles.insert(p.handleID)
+            for handle in p.handleIDs {
+                perSpeaker[handle] = p.label
+                rosterHandles.insert(handle)
+            }
         }
         return Extractor(targetHandles: [], handleLabels: perSpeaker, rosterHandles: rosterHandles)
     }

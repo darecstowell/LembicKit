@@ -18,8 +18,30 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   `Conversation.chatGUIDs`. `ConversationSummary` and `GroupConversationSummary`
   carry the new `guid` field (bugs.md #5, redaction.md F10).
 
+### Added
+
+- `Conversations.personKeys(handleLabels:personCentricIDs:contactIDs:)`,
+  `ChatDatabase.personCentricIDs()`, and `ChatDatabase.groupChatLinks()` (reads
+  `chat_lookup` on macOS 26 when present).
+- `ContactsMap.ContactInfo.contactIDs` (normalized handle to `CNContact.identifier`)
+  and a `contactIDs:` parameter on `Conversations.list(from:...)`. Pass it so one
+  person's handles join by Contacts card, not by name.
+- `Participant.handleIDs`, `Conversation.firstMessageDate`, and
+  `GroupConversationSummary.groupID` and `.firstMessageDate`.
+
 ### Fixed
 
+- Group stitching no longer merges different groups. Chats with different names
+  never merge, even with the same members (for example "Book club" and "Lisbon
+  trip"). When one roster has two names, its unnamed chats stay apart. The opt-in
+  fuzzy pass also never merges two groups that were active at the same time, so
+  a subgroup planning a surprise no longer folds into the main group
+  (lembickit.md F1).
+- One group no longer splits when a member uses a second handle. Stitching
+  compares people, not handle rows: one number on iMessage, SMS, and RCS is one
+  person, and so are handles linked by `person_centric_id` or by one Contacts
+  card. Chats Apple links through `chat.group_id` or `chat_lookup` also join.
+  Every handle of a person gets the same speaker label (lembickit.md F2).
 - macOS 14 databases export again. The schema guard now fails closed only on the
   core columns the engine cannot work without (`ChatDatabase.requiredSchema` and
   `requiredBodyColumns`). Every other column is in the new
