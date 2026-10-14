@@ -39,45 +39,42 @@ public struct Redaction: Hashable, Sendable {
 /// the spans are moot. `contains`, `all`, and `redactions(forGuid:)` reflect
 /// that absorption so callers never see redundant spans behind a tombstone.
 public struct RedactionSet: Sendable, Equatable {
-    private var items: Set<Redaction>
+    /// Indexed by guid, so a render looks up each message in constant time.
+    private var byGuid: [String: Set<Redaction>]
 
-    public init() { items = [] }
+    public init() { byGuid = [:] }
 
     /// Insert a redaction. Adding a whole-message redaction drops any existing
     /// span redactions for the same guid (they are now absorbed by the tombstone).
     public mutating func add(_ redaction: Redaction) {
         if redaction.range == nil {
-            // Whole-message redaction absorbs the guid's spans.
-            items = items.filter { $0.guid != redaction.guid }
-        } else if items.contains(Redaction(guid: redaction.guid, range: nil)) {
-            // A whole-message redaction already covers this guid — span is moot.
-            return
+            byGuid[redaction.guid] = [redaction]
+        } else if byGuid[redaction.guid]?.contains(Redaction(guid: redaction.guid, range: nil))
+            != true
+        {
+            byGuid[redaction.guid, default: []].insert(redaction)
         }
-        items.insert(redaction)
     }
 
     public mutating func remove(_ redaction: Redaction) {
-        items.remove(redaction)
+        byGuid[redaction.guid]?.remove(redaction)
+        if byGuid[redaction.guid]?.isEmpty == true { byGuid[redaction.guid] = nil }
     }
 
     public func contains(_ redaction: Redaction) -> Bool {
+        guard let set = byGuid[redaction.guid] else { return false }
         // A whole-message redaction implicitly contains any span for its guid.
-        if redaction.range != nil, items.contains(Redaction(guid: redaction.guid, range: nil)) {
-            return true
-        }
-        return items.contains(redaction)
+        return set.contains(redaction) || set.contains(Redaction(guid: redaction.guid, range: nil))
     }
 
-    public var isEmpty: Bool { items.isEmpty }
+    public var isEmpty: Bool { byGuid.isEmpty }
 
-    public var all: [Redaction] { Array(items) }
+    public var all: [Redaction] { byGuid.values.flatMap { $0 } }
 
     /// The redactions anchored to `guid`. If a whole-message redaction exists
     /// for the guid it is returned alone (it absorbs the spans).
     public func redactions(forGuid guid: String) -> [Redaction] {
-        let whole = Redaction(guid: guid, range: nil)
-        if items.contains(whole) { return [whole] }
-        return items.filter { $0.guid == guid }
+        byGuid[guid].map(Array.init) ?? []
     }
 }
 
@@ -89,7 +86,8 @@ public struct RedactionSet: Sendable, Equatable {
 /// "flag for review" detectors round out the set:
 /// `seedPhrase` (BIP-39 checksum), `apiKey` (curated prefixed token formats),
 /// `standingCode` (door/gate/PIN keyword-proximity), and `bankAccount` (IBAN
-/// mod-97 + US ABA routing). 2FA/OTP codes and PII are handled separately
+/// mod-97 + US ABA routing, plus account numbers near a keyword). `idNumber`,
+/// `recoveryKey`, and `invisibleInk` complete the set. 2FA/OTP codes and PII are handled separately
 /// (they ship as opt-in auto-remove *scrubbers*, not flag-for-review
 /// detectors).
 public enum SecretCategory: String, Sendable, CaseIterable, Hashable {
@@ -100,6 +98,12 @@ public enum SecretCategory: String, Sendable, CaseIterable, Hashable {
     case apiKey
     case standingCode
     case bankAccount
+    /// Passport, driver's license, national ID, and health ID numbers.
+    case idNumber
+    /// Account recovery keys, 2FA backup codes, and authenticator (TOTP) secrets.
+    case recoveryKey
+    /// A message sent with the Invisible Ink effect: the sender meant to hide it.
+    case invisibleInk
 }
 
 /// The opt-in **scrubber** categories. Unlike
@@ -113,10 +117,9 @@ public enum SecretCategory: String, Sendable, CaseIterable, Hashable {
 ///
 /// `phone` and `postalAddress` ride Apple's on-device `NSDataDetector`; `email`
 /// uses a standard RFC-ish address regex (NSDataDetector misses bare emails);
-/// `otp` matches only high-precision 2FA forms (machine-readable `#123456` /
-/// `G-123456`, or a strong-cue "verification/security/login code is NNNNNN"
-/// phrase) — bare digit runs are deliberately NOT scrubbed (a year/zip/amount
-/// would be nuked). Name-anonymization is NOT a scrubber category — it rides the
+/// `otp` matches only sign-in code forms (a code next to a sign-in cue, the
+/// code-first form, the domain-bound form, `G-123456`); bare digit runs are
+/// never removed. Name-anonymization is NOT a scrubber category — it rides the
 /// existing `anonymizeSpeakers` transform (output = a `PN` alias, not
 /// `[redacted]`).
 public enum ScrubberCategory: String, Sendable, CaseIterable, Hashable {

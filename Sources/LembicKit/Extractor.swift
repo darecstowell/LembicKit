@@ -12,6 +12,8 @@ public struct MessageRecord: Sendable {
     public let text: String
     public let hadAttachment: Bool
     public var reactions: [Reaction]
+    /// Sent with the Invisible Ink effect; the detector flags the whole message.
+    public let isInvisibleInk: Bool
     /// What kept this row from reading as a normal message. Empty for most rows.
     public var flags: Flags
 
@@ -48,7 +50,8 @@ public struct MessageRecord: Sendable {
         text: String,
         hadAttachment: Bool,
         reactions: [Reaction],
-        flags: Flags = []
+        flags: Flags = [],
+        isInvisibleInk: Bool = false
     ) {
         self.guid = guid
         self.date = date
@@ -59,6 +62,7 @@ public struct MessageRecord: Sendable {
         self.hadAttachment = hadAttachment
         self.reactions = reactions
         self.flags = flags
+        self.isInvisibleInk = isInvisibleInk
     }
 }
 
@@ -434,6 +438,8 @@ public struct Extractor: Sendable {
         return true
     }
 
+    static let invisibleInkEffect = "com.apple.MobileSMS.expressivesend.invisibleink"
+
     static func collapseSpaceRuns(_ s: String) -> String {
         var out = ""
         out.reserveCapacity(s.count)
@@ -527,7 +533,8 @@ public struct Extractor: Sendable {
                        \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data,
                        \(m("error")) error, \(m("is_sent")) is_sent,
                        \(m("schedule_type")) schedule_type,
-                       \(m("message_summary_info")) msi
+                       \(m("message_summary_info")) msi,
+                       \(m("expressive_send_style_id")) effect
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY \(Self.sortableDate), m.ROWID
@@ -651,7 +658,8 @@ public struct Extractor: Sendable {
                 text: text,
                 hadAttachment: hadAttachment,
                 reactions: [],
-                flags: flags)
+                flags: flags,
+                isInvisibleInk: (row[19] as String?) == Self.invisibleInkEffect)
             if let guid { indexByGUID[guid] = emitted.count }
             emitted.append(record)
             incoming.append(!isFromMe)

@@ -38,9 +38,11 @@ struct SchemaDegradeTests {
         let conversation = try #require(conversations.first)
         let rendered = try Export(database: db).render(
             conversation, formats: [.txt], resolveContacts: false)
-        #expect(rendered.records.map(\.text) == ["hello"], "the reaction row is not a message")
         #expect(
-            rendered.records.first?.reactions == [Reaction(by: "Them", emoji: "•")],
+            rendered.unredactedRecords.map(\.text) == ["hello"], "the reaction row is not a message"
+        )
+        #expect(
+            rendered.unredactedRecords.first?.reactions == [Reaction(by: "Them", emoji: "•")],
             "an emoji tapback without the emoji column falls back to a dot")
     }
 
@@ -71,7 +73,7 @@ struct SchemaDegradeTests {
         for conversation in conversations {
             let rendered = try exporter.render(
                 conversation, formats: [.txt], resolveContacts: false)
-            #expect(rendered.records.count == 1, "each chat still yields its message")
+            #expect(rendered.unredactedRecords.count == 1, "each chat still yields its message")
         }
         let events = try db.read {
             try Extractor(targetHandles: [], handleLabels: [:]).extractSystemEvents(

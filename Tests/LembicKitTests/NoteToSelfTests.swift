@@ -39,8 +39,10 @@ struct NoteToSelfTests {
         let rendered = try Export(database: db).render(
             notes, detect: false, resolveContacts: false)
         #expect(
-            rendered.records.map(\.text) == ["Buy milk and stamps", "Sent from my other phone"])
-        #expect(rendered.records.allSatisfy { $0.speaker == "Me" })
+            rendered.unredactedRecords.map(\.text) == [
+                "Buy milk and stamps", "Sent from my other phone",
+            ])
+        #expect(rendered.unredactedRecords.allSatisfy { $0.speaker == "Me" })
         #expect(rendered.skipped.map(\.reason) == [.echo])
         let txt = try #require(rendered.txt)
         #expect(txt.hasPrefix("# Messages transcript: notes to self\n"))

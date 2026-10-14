@@ -104,14 +104,70 @@ public enum Transcript {
     /// gates on `hadAttachment`, so a literally-typed "[pdf]" in a message with
     /// no real attachment is left alone (rare edge, acceptable for a trim).
     static func stripPlaceholders(_ s: String) -> String {
-        var out = s
+        let source = s as NSString
+        return applyReplacements(to: source, placeholderStripSubstitutions(source))
+    }
+
+    /// The placeholder strip as substitutions in SOURCE offsets, so it composes with
+    /// redaction spans and the `OffsetMap` instead of shifting them.
+    static func placeholderStripSubstitutions(_ source: NSString) -> [BodySubstitution] {
+        let length = source.length
+        guard length > 0 else { return [] }
+        var isToken = [Bool](repeating: false, count: length)
         for token in placeholderTokens {
-            out = out.replacingOccurrences(of: token, with: " ")
+            var search = NSRange(location: 0, length: length)
+            while search.length > 0 {
+                let found = source.range(of: token, options: .literal, range: search)
+                if found.location == NSNotFound { break }
+                for k in found.location..<(found.location + found.length) { isToken[k] = true }
+                let next = found.location + found.length
+                search = NSRange(location: next, length: length - next)
+            }
         }
-        out = out.replacingOccurrences(
-            of: #"\[genmoji: [^\]]*\]"#, with: " ", options: .regularExpression)
-        return Extractor.collapseSpaceRuns(out)
-            .trimmingCharacters(in: Extractor.pythonWhitespace)
+        var search = NSRange(location: 0, length: length)
+        while search.length > 0 {
+            let found = source.range(
+                of: #"\[genmoji: [^\]]*\]"#, options: .regularExpression, range: search)
+            if found.location == NSNotFound { break }
+            for k in found.location..<(found.location + found.length) { isToken[k] = true }
+            let next = found.location + found.length
+            search = NSRange(location: next, length: length - next)
+        }
+        func isSpace(_ k: Int) -> Bool {
+            let c = source.character(at: k)
+            return c == 0x20 || c == 0x09
+        }
+        func isEdge(_ k: Int) -> Bool {
+            if isToken[k] { return true }
+            guard let scalar = Unicode.Scalar(source.character(at: k)) else { return false }
+            return Extractor.pythonWhitespace.contains(scalar)
+        }
+        var head = 0
+        while head < length, isEdge(head) { head += 1 }
+        guard head < length else {
+            return [BodySubstitution(range: 0..<length, token: "", isRedaction: false)]
+        }
+        var tail = length
+        while tail > head, isEdge(tail - 1) { tail -= 1 }
+        var out: [BodySubstitution] = []
+        if head > 0 { out.append(BodySubstitution(range: 0..<head, token: "", isRedaction: false)) }
+        var k = head
+        while k < tail {
+            guard isToken[k] || isSpace(k) else {
+                k += 1
+                continue
+            }
+            var end = k
+            while end < tail, isToken[end] || isSpace(end) { end += 1 }
+            if !(end - k == 1 && source.character(at: k) == 0x20) {
+                out.append(BodySubstitution(range: k..<end, token: " ", isRedaction: false))
+            }
+            k = end
+        }
+        if tail < length {
+            out.append(BodySubstitution(range: tail..<length, token: "", isRedaction: false))
+        }
+        return out
     }
 
     /// The legend entries, in a fixed order, for the placeholder kinds that occur
@@ -275,13 +331,17 @@ public enum Transcript {
     /// `.jsonl` speaker labels can never diverge. The mapping itself is never
     /// written into the output, so an assistant can't tell which Person is the
     /// user — which is the point.
-    static func anonymizationMap(for records: [MessageRecord]) -> [String: String] {
+    static func anonymizationMap(
+        for records: [MessageRecord], knownNames: [String: [String]] = [:]
+    ) -> [String: String] {
         var seen: [String] = []
         func note(_ label: String) { if !seen.contains(label) { seen.append(label) } }
         for r in records {
             note(r.speaker)
             for reaction in r.reactions { note(reaction.by) }
         }
+        // Labels the caller names but that never spoke (a quiet group member).
+        for label in knownNames.keys.sorted() { note(label) }
         // Float the owner to the front (stable order for everyone else).
         let ordered = seen.filter { $0 == meLabel } + seen.filter { $0 != meLabel }
         var map: [String: String] = [:]
@@ -387,7 +447,7 @@ public enum Transcript {
         guard guid != nil else { return text }
         let source = text as NSString
         let reps = bodyReplacements(
-            source: source, guid: guid, redactions: redactions, aliases: [:])
+            source: source, guid: guid, redactions: redactions, names: nil)
         return applyReplacements(to: source, reps)
     }
 
@@ -404,54 +464,6 @@ public enum Transcript {
         let range: Range<Int>
         let token: String
         let isRedaction: Bool
-    }
-
-    /// The in-body name-alias substitutions for one message under `anonymize`:
-    /// every whole-word, case-insensitive mention of a known participant NAME,
-    /// mapped to that participant's stable `PN` alias (so "tell Sarah hi" →
-    /// "tell P2 hi"). Empty when not anonymizing or when the body mentions no
-    /// participant. Reuses the SAME `aliases` map the speaker relabeling uses, so
-    /// the in-body alias and the speaker prefix always agree.
-    ///
-    /// Only real NAMES are aliased: the owner label `"Me"`, the generic `"Them"`,
-    /// and any label that is a formatted phone number (all digits / punctuation /
-    /// whitespace, no letter) are skipped — those are not names worth pseudonymizing
-    /// in the body, and `"Them"` would over-match the common English word. NO NER /
-    /// no third-party-name detection — exact-match against the known participant
-    /// labels only.
-    static func nameAliasReplacements(
-        in body: NSString, aliases: [String: String]
-    ) -> [BodySubstitution] {
-        guard !aliases.isEmpty, body.length > 0 else { return [] }
-        var out: [BodySubstitution] = []
-        // Stable order (longest label first) so a label that is a substring of a
-        // longer one can't pre-empt the longer match; ties broken by the label so
-        // the scan is deterministic.
-        let labels = aliases.keys
-            .filter { isAliasableName($0) }
-            .sorted { $0.count != $1.count ? $0.count > $1.count : $0 < $1 }
-        let whole = NSRange(location: 0, length: body.length)
-        for label in labels {
-            guard let alias = aliases[label] else { continue }
-            // Whole-word, case-insensitive literal match on the label. `\Q…\E`
-            // quotes the label so any regex metacharacters in a name are literal.
-            let pattern = #"(?i)\b\#(NSRegularExpression.escapedPattern(for: label))\b"#
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            regex.enumerateMatches(in: body as String, range: whole) { match, _, _ in
-                guard let match, match.range.length > 0, let range = Range(match.range)
-                else { return }
-                out.append(BodySubstitution(range: range, token: alias, isRedaction: false))
-            }
-        }
-        return out
-    }
-
-    /// True when a participant label is a real, aliasable NAME: not the owner
-    /// label `"Me"`, not the generic `"Them"`, and not a formatted phone number
-    /// (a label with no letter — all digits / punctuation / whitespace).
-    static func isAliasableName(_ label: String) -> Bool {
-        if label == meLabel || label == "Them" { return false }
-        return label.contains { $0.isLetter }
     }
 
     /// Two half-open ranges intersect.
@@ -510,12 +522,19 @@ public enum Transcript {
     public static func redactedText(
         of record: MessageRecord, redactions: RedactionSet
     ) -> String? {
-        if let guid = record.guid,
-            redactions.redactions(forGuid: guid).contains(where: { $0.range == nil })
-        {
-            return nil
-        }
+        if coversWholeMessage(record, redactions: redactions) { return nil }
         return applySpanRedactions(to: record.text, guid: record.guid, redactions: redactions)
+    }
+
+    /// True when a redaction hides the whole message: a nil range, a span over the
+    /// whole text, or a span past the end of the text (a stale anchor never fails open).
+    static func coversWholeMessage(_ record: MessageRecord, redactions: RedactionSet) -> Bool {
+        guard let guid = record.guid else { return false }
+        let len = (record.text as NSString).length
+        return redactions.redactions(forGuid: guid).contains { r in
+            guard let range = r.range else { return true }
+            return range == 0..<len || range.lowerBound < 0 || range.upperBound > len
+        }
     }
 
     /// The unified, ascending, non-overlapping `[BodySubstitution]` list for ONE
@@ -531,7 +550,8 @@ public enum Transcript {
     /// `source` is the message body as an `NSString` (UTF-16 offsets); `guid` is
     /// nil-safe (a nil-guid message has no redactions, only aliases can apply).
     static func bodyReplacements(
-        source: NSString, guid: String?, redactions: RedactionSet, aliases: [String: String]
+        source: NSString, guid: String?, redactions: RedactionSet, names: NameMatcher?,
+        stripPlaceholders: Bool = false
     ) -> [BodySubstitution] {
         let sourceLen = source.length
 
@@ -546,31 +566,42 @@ public enum Transcript {
                     $0.lowerBound >= 0 && $0.upperBound <= sourceLen
                         && $0.lowerBound < $0.upperBound
                 }
-                .sorted { $0.lowerBound < $1.lowerBound }
-            for sp in clamped {
-                if let last = redactionReps.last, sp.lowerBound <= last.range.upperBound {
-                    let merged =
-                        last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
-                    redactionReps[redactionReps.count - 1] = BodySubstitution(
-                        range: merged, token: "[redacted]", isRedaction: true)
-                } else {
-                    redactionReps.append(
-                        BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
-                }
-            }
+            redactionReps = mergedRedactionSubstitutions(clamped)
         }
 
         // (b) In-body name-alias replacements (anonymize only; empty otherwise).
         // On overlap with a redaction span the REDACTION wins — the value already
         // reads `[redacted]`.
-        let aliasReps = Self.nameAliasReplacements(in: source, aliases: aliases)
+        let aliasReps = (names?.substitutions(in: source) ?? [])
             .filter { a in
                 !redactionReps.contains { r in rangesOverlap(a.range, r.range) }
             }
 
+        // A strip that touches a redaction is dropped: the redaction already hides it.
+        let stripReps =
+            stripPlaceholders
+            ? placeholderStripSubstitutions(source).filter { s in
+                !redactionReps.contains { r in rangesOverlap(s.range, r.range) }
+            } : []
+
         // (c) Unified, non-overlapping, ascending list. Redactions are placed first
         // so an alias that ties a redaction start is dropped.
-        return dedupedReplacements(redactionReps + aliasReps)
+        return dedupedReplacements(redactionReps + stripReps + aliasReps)
+    }
+
+    /// Overlapping or touching spans merged into one `[redacted]` substitution each.
+    static func mergedRedactionSubstitutions(_ spans: [Range<Int>]) -> [BodySubstitution] {
+        var out: [BodySubstitution] = []
+        for sp in spans.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = out.last, sp.lowerBound <= last.range.upperBound {
+                let merged = last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
+                out[out.count - 1] = BodySubstitution(
+                    range: merged, token: "[redacted]", isRedaction: true)
+            } else {
+                out.append(BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
+            }
+        }
+        return out
     }
 
     /// The fully-rendered body for ONE message — redaction spans spliced to
@@ -592,16 +623,23 @@ public enum Transcript {
     public static func renderedBody(
         of record: MessageRecord, redactions: RedactionSet, aliases: [String: String]
     ) -> String? {
-        if let guid = record.guid {
-            let rs = redactions.redactions(forGuid: guid)
-            let len = (record.text as NSString).length
-            // Whole-message redaction (explicit nil-range OR a span covering the
-            // whole text) → omit the row (no inline splice).
-            if rs.contains(where: { $0.range == nil || $0.range == 0..<len }) { return nil }
-        }
+        renderedBody(
+            of: record, redactions: redactions,
+            names: aliases.isEmpty ? nil : NameMatcher(aliases: aliases), stripPlaceholders: false)
+    }
+
+    /// `renderedBody` with a prebuilt name matcher and the optional placeholder strip,
+    /// both applied in source offsets.
+    static func renderedBody(
+        of record: MessageRecord, redactions: RedactionSet, names: NameMatcher?,
+        stripPlaceholders: Bool
+    ) -> String? {
+        // Whole-message redaction → omit the row (no inline splice).
+        if coversWholeMessage(record, redactions: redactions) { return nil }
         let source = record.text as NSString
         let reps = bodyReplacements(
-            source: source, guid: record.guid, redactions: redactions, aliases: aliases)
+            source: source, guid: record.guid, redactions: redactions, names: names,
+            stripPlaceholders: stripPlaceholders)
         return applyReplacements(to: source, reps)
     }
 
@@ -611,6 +649,7 @@ public enum Transcript {
         anonymize: Bool = false,
         group: GroupRenderInfo? = nil,
         systemEvents: [SystemEvent] = [],
+        knownNames: [String: [String]] = [:],
         timeZone: TimeZone = .current,
         noteToSelf: Bool = false
     ) -> RenderResult {
@@ -619,7 +658,8 @@ public enum Transcript {
         // Speaker → "Person N" map when de-biasing; empty otherwise (alias lookups
         // fall through to the real label). Built from the raw records so the .txt
         // and .jsonl maps are identical (same input set).
-        let aliases = anonymize ? anonymizationMap(for: records) : [:]
+        let aliases = anonymize ? anonymizationMap(for: records, knownNames: knownNames) : [:]
+        let names = anonymize ? NameMatcher(aliases: aliases, knownNames: knownNames) : nil
         func alias(_ speaker: String) -> String { aliases[speaker] ?? speaker }
 
         // Group detected secrets by guid for O(1) lookup per message.
@@ -631,7 +671,8 @@ public enum Transcript {
         struct Emit {
             let date: Date
             let speaker: String
-            let text: String  // body BEFORE redaction transforms (post attach-trim)
+            let text: String  // source body; trim and redaction both splice in source offsets
+            let stripPlaceholders: Bool
             let reactions: [Reaction]
             let hadAttachment: Bool
             let guid: String?
@@ -640,31 +681,17 @@ public enum Transcript {
         var emit: [Emit] = []
         emit.reserveCapacity(records.count)
         for r in records {
-            var text = r.text
-            if trim.dropAttachmentPlaceholders, r.hadAttachment {
-                text = stripPlaceholders(text)
-                if text.isEmpty { continue }
-            }
-            // Whole-message redaction? Either an explicit nil-range redaction, or
-            // a span that covers the entire (pre-trim) text. nil-guid records can
-            // never be redacted.
+            let strip = trim.dropAttachmentPlaceholders && r.hadAttachment
+            if strip, stripPlaceholders(r.text).isEmpty { continue }
+            // Whole-message redaction? A nil range, a span over the entire source
+            // text, or a stale span past its end. nil-guid records are never redacted.
             var whole: Redaction?
-            if let guid = r.guid {
-                let rs = redactions.redactions(forGuid: guid)
-                if rs.contains(where: { $0.range == nil }) {
-                    whole = Redaction(guid: guid, range: nil)
-                } else {
-                    // A span that covers the entire (pre-trim) text is a whole-
-                    // message redaction in disguise; normalize it to a tombstone.
-                    let len = (r.text as NSString).length
-                    if rs.contains(where: { $0.range == 0..<len }) {
-                        whole = Redaction(guid: guid, range: nil)
-                    }
-                }
+            if let guid = r.guid, coversWholeMessage(r, redactions: redactions) {
+                whole = Redaction(guid: guid, range: nil)
             }
             emit.append(
                 Emit(
-                    date: r.date, speaker: r.speaker, text: text,
+                    date: r.date, speaker: r.speaker, text: r.text, stripPlaceholders: strip,
                     reactions: trim.dropReactions ? [] : r.reactions,
                     hadAttachment: r.hadAttachment, guid: r.guid, whole: whole))
         }
@@ -845,7 +872,8 @@ public enum Transcript {
             // splice here is byte-identical to what `renderedBody` (the `.jsonl` +
             // downstream-formatter path) produces.
             let allReps = Self.bodyReplacements(
-                source: sourceNS, guid: guid, redactions: redactions, aliases: aliases)
+                source: sourceNS, guid: guid, redactions: redactions, names: names,
+                stripPlaceholders: r.stripPlaceholders)
 
             // Build the transformed body (pre-indentation) by splicing every
             // replacement; with no replacements this returns `r.text` unchanged
@@ -853,8 +881,10 @@ public enum Transcript {
             let transformedBody = Self.applyReplacements(to: sourceNS, allReps)
 
             // Indentation transform on the body (newline → newline+8sp).
-            let indented = transformedBody.replacingOccurrences(
-                of: "\n", with: "\n        ")
+            let indented =
+                transformedBody.contains("\n")
+                ? transformedBody.replacingOccurrences(of: "\n", with: "\n        ")
+                : transformedBody
             let indentedNS = indented as NSString
 
             // Offset map covering BOTH transforms (the unified replacement collapse
@@ -955,19 +985,23 @@ public enum Transcript {
     public static func jsonLines(
         records: [MessageRecord], redactions: RedactionSet = RedactionSet(),
         anonymize: Bool = false,
+        knownNames: [String: [String]] = [:],
         timeZone: TimeZone = .current
     ) -> String {
         let local = LocalClock(timeZone: timeZone)
         // Same speaker → "Person N" map the .txt path uses, so the two outputs
         // label identically. Empty when not anonymizing (lookups fall through).
-        let aliases = anonymize ? anonymizationMap(for: records) : [:]
+        let aliases = anonymize ? anonymizationMap(for: records, knownNames: knownNames) : [:]
+        let names = anonymize ? NameMatcher(aliases: aliases, knownNames: knownNames) : nil
         var out = ""
         for r in records {
             // Whole-message redaction → omit the object (no jsonl tombstone).
             // `renderedBody` returns nil for it; nil-guid records can never be
             // whole-redacted, so they always render. The body is the SAME unified
             // splice (redactions + in-body aliases) the `.txt` path shows.
-            guard let body = Self.renderedBody(of: r, redactions: redactions, aliases: aliases)
+            guard
+                let body = Self.renderedBody(
+                    of: r, redactions: redactions, names: names, stripPlaceholders: false)
             else { continue }
             var fields: [(String, String)] = [
                 ("d", jsonString(local.stamp(r.date))),
