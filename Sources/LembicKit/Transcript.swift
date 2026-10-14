@@ -30,10 +30,14 @@ public enum Transcript {
     public struct GroupRenderInfo: Sendable, Equatable {
         public let name: String
         public let participantLabels: [String]
+        /// People who wrote or were named in an event but are no longer members.
+        /// The header lists them after the members, as "Carla (left)".
+        public let formerLabels: [String]
 
-        public init(name: String, participantLabels: [String]) {
+        public init(name: String, participantLabels: [String], formerLabels: [String] = []) {
             self.name = name
             self.participantLabels = participantLabels
+            self.formerLabels = formerLabels
         }
     }
 
@@ -575,7 +579,9 @@ public enum Transcript {
         if let group, renderGroup {
             // The full roster: "Me = the account owner" plus every member's label
             // (incl. any who never spoke), so an assistant can attribute every line.
-            let roster = (["Me = the account owner"] + group.participantLabels)
+            let roster =
+                (["Me = the account owner"] + group.participantLabels
+                + group.formerLabels.map { "\($0) (left)" })
                 .joined(separator: " · ")
             out += "# Participants: \(roster)\n"
         } else if anonymize {

@@ -145,6 +145,10 @@ public struct Extractor: Sendable {
                 rosterHandles.insert(handle)
             }
         }
+        for handle in conversation.ownerHandles {
+            perSpeaker[handle] = "Me"
+            rosterHandles.insert(handle)
+        }
         return Extractor(targetHandles: [], handleLabels: perSpeaker, rosterHandles: rosterHandles)
     }
 

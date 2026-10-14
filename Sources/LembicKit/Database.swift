@@ -195,11 +195,16 @@ public final class ChatDatabase: @unchecked Sendable {
         public let messageCount: Int  // real messages (reactions/system excluded)
         /// `chat.guid`: stable across renames, Contacts changes, and member changes.
         public let guid: String?
+        /// The owner's own addresses seen in this chat (`destination_caller_id` of
+        /// the owner's messages), raw.
+        public let ownerIdentifiers: Set<String>
 
         public init(
             chatID: Int64, identifier: String?, service: String?,
-            handleID: Int64, lastMessageDate: Date, messageCount: Int, guid: String? = nil
+            handleID: Int64, lastMessageDate: Date, messageCount: Int, guid: String? = nil,
+            ownerIdentifiers: Set<String> = []
         ) {
+            self.ownerIdentifiers = ownerIdentifiers
             self.chatID = chatID
             self.identifier = identifier
             self.service = service
@@ -229,7 +234,7 @@ public final class ChatDatabase: @unchecked Sendable {
                            \(cols.column("c", "chat", "service_name")) svc,
                            \(cols.column("c", "chat", "guid")) cguid,
                            chj.handle_id hid, MAX(\(Self.sentDate(cols))) lastDate,
-                           COUNT(*) cnt
+                           COUNT(*) cnt, \(Self.ownerAddresses(cols)) me
                     FROM chat c
                     JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
                     \(handleJoin)
@@ -249,7 +254,8 @@ public final class ChatDatabase: @unchecked Sendable {
                     lastMessageDate: Date(
                         timeIntervalSince1970: Double(ns) / 1e9 + Extractor.appleEpochOffset),
                     messageCount: row["cnt"] ?? 0,
-                    guid: row["cguid"])
+                    guid: row["cguid"],
+                    ownerIdentifiers: Self.splitAddresses(row["me"]))
             }
         }
     }
@@ -277,12 +283,16 @@ public final class ChatDatabase: @unchecked Sendable {
         public let groupID: String?
         /// The oldest real message, or nil when unknown.
         public let firstMessageDate: Date?
+        /// The owner's own addresses seen in this chat, raw.
+        public let ownerIdentifiers: Set<String>
 
         public init(
             chatID: Int64, identifier: String?, service: String?, displayName: String?,
             lastMessageDate: Date, messageCount: Int, participantHandles: [Int64],
-            guid: String? = nil, groupID: String? = nil, firstMessageDate: Date? = nil
+            guid: String? = nil, groupID: String? = nil, firstMessageDate: Date? = nil,
+            ownerIdentifiers: Set<String> = []
         ) {
+            self.ownerIdentifiers = ownerIdentifiers
             self.chatID = chatID
             self.identifier = identifier
             self.service = service
@@ -333,7 +343,8 @@ public final class ChatDatabase: @unchecked Sendable {
                            \(cols.column("c", "chat", "guid")) cguid,
                            \(cols.column("c", "chat", "group_id")) gid,
                            MIN(CASE WHEN m.date > 0 THEN m.date END) firstDate,
-                           MAX(\(Self.sentDate(cols))) lastDate, COUNT(*) cnt
+                           MAX(\(Self.sentDate(cols))) lastDate, COUNT(*) cnt,
+                           \(Self.ownerAddresses(cols)) me
                     FROM chat c
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
@@ -359,7 +370,8 @@ public final class ChatDatabase: @unchecked Sendable {
                     groupID: row["gid"],
                     firstMessageDate: firstNS.map {
                         Date(timeIntervalSince1970: Double($0) / 1e9 + Extractor.appleEpochOffset)
-                    })
+                    },
+                    ownerIdentifiers: Self.splitAddresses(row["me"]))
             }
         }
     }
@@ -408,41 +420,61 @@ public final class ChatDatabase: @unchecked Sendable {
 
     /// Per-(group chat, participant) real-message volume — one **grouped** read
     /// over every style=43 chat, keyed `chatID → (handleID → count)`. Runs ONCE
-    /// per session alongside `groupConversationSummaries()`, NOT per row: the
-    /// single `GROUP BY chat_id, handle_id` query lets `Conversations.groupGroups`
-    /// order each group's roster most-active-first by summing a
-    /// participant's counts across the stitched fork's chatIDs in memory — no
-    /// per-participant query on the hot list-load path.
+    /// per session alongside `groupConversationSummaries()`, NOT per row, so
+    /// `Conversations.groupGroups` can order each roster most-active-first and
+    /// find people who are no longer in `chat_handle_join`.
     ///
     /// Counts use *real* messages only (`COALESCE(item_type,0) = 0`, reactions and
     /// system events excluded), matching the recency/size reads. "Me"
-    /// (`is_from_me = 1`) is excluded — it's never a roster member, so its volume
-    /// would have nowhere to land; the roster orders the *others* by how much they
-    /// talk. A silent member (0 real messages) simply has no row here and falls to
-    /// the end of the order via the stable alphabetical tiebreak.
+    /// (`is_from_me = 1`) is excluded. A person an add or remove event names
+    /// (`other_handle`) who never wrote has a count of 0, so former members who
+    /// stayed silent still reach the roster.
     public func groupParticipantMessageCounts() throws -> [Int64: [Int64: Int]] {
         try read { db in
             let cols = try SchemaColumns.load(db)
+            let itemType = "COALESCE(\(cols.column("m", "message", "item_type")), 0)"
+            let other = "COALESCE(\(cols.column("m", "message", "other_handle")), 0)"
             var counts: [Int64: [Int64: Int]] = [:]
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT cmj.chat_id cid, m.handle_id hid, COUNT(*) cnt
+                    SELECT cmj.chat_id cid,
+                           CASE WHEN \(itemType) = 1 THEN \(other) ELSE m.handle_id END hid,
+                           SUM(CASE WHEN \(itemType) = 1 THEN 0 ELSE 1 END) cnt
                     FROM chat c
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
                     WHERE c.style = 43
-                      AND m.is_from_me = 0
-                      AND \(Self.realMessageFilter(cols))
-                    GROUP BY cmj.chat_id, m.handle_id
+                      AND ((m.is_from_me = 0 AND \(Self.realMessageFilter(cols)))
+                           OR (\(itemType) = 1 AND \(other) > 0))
+                    GROUP BY cid, hid
                     """)
             for row in rows {
                 let cid: Int64 = row["cid"]
-                guard let hid: Int64 = row["hid"] else { continue }
+                guard let hid: Int64 = row["hid"], hid > 0 else { continue }
                 counts[cid, default: [:]][hid] = row["cnt"] ?? 0
             }
             return counts
         }
+    }
+
+    /// SQL that keeps real messages only: no system rows, no reactions.
+    static func realMessageFilter(_ cols: SchemaColumns) -> String {
+        "COALESCE(\(cols.column("m", "message", "item_type")), 0) = 0"
+            + " AND COALESCE(\(cols.column("m", "message", "associated_message_type")), 0) = 0"
+    }
+
+    /// The distinct `destination_caller_id` values of the owner's messages, as one
+    /// comma-joined string per group.
+    static func ownerAddresses(_ cols: SchemaColumns) -> String {
+        let caller = cols.column("m", "message", "destination_caller_id")
+        return "GROUP_CONCAT(DISTINCT CASE WHEN m.is_from_me = 1 THEN \(caller) END)"
+    }
+
+    static func splitAddresses(_ joined: String?) -> Set<String> {
+        Set(
+            (joined ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty })
     }
 
     /// `m.date`, or NULL for a Send Later row that has not gone out, so a future
@@ -451,12 +483,6 @@ public final class ChatDatabase: @unchecked Sendable {
         let type = cols.column("m", "message", "schedule_type")
         let sent = cols.column("m", "message", "is_sent")
         return "CASE WHEN \(type) = 2 AND COALESCE(\(sent), 0) = 0 THEN NULL ELSE m.date END"
-    }
-
-    /// SQL that keeps real messages only: no system rows, no reactions.
-    static func realMessageFilter(_ cols: SchemaColumns) -> String {
-        "COALESCE(\(cols.column("m", "message", "item_type")), 0) = 0"
-            + " AND COALESCE(\(cols.column("m", "message", "associated_message_type")), 0) = 0"
     }
 
     // MARK: - Schema-sanity guard
@@ -487,7 +513,7 @@ public final class ChatDatabase: @unchecked Sendable {
                 "service", "text", "attributedBody", "item_type", "associated_message_type",
                 "associated_message_guid", "associated_message_emoji", "balloon_bundle_id",
                 "date_retracted", "payload_data", "group_action_type", "group_title",
-                "other_handle", "error", "is_sent", "schedule_type",
+                "other_handle", "error", "is_sent", "schedule_type", "destination_caller_id",
             ]
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),

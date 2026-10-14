@@ -31,6 +31,17 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- The group roster is complete and correct. A person who wrote in the group or
+  was added or removed, but is no longer a member, is listed after the members
+  as "Carla (left)" (`Participant.isFormer`, `GroupRenderInfo.formerLabels`) and
+  gets the same label in the body and in event lines. The owner's own second
+  number or email is never a member: it is found from `destination_caller_id`
+  on the owner's messages (`ConversationSummary.ownerIdentifiers`,
+  `GroupConversationSummary.ownerIdentifiers`) and from the Me card
+  (`ContactInfo.ownerIdentifiers`), and its messages label as "Me"
+  (`Conversation.ownerHandles`). `groupParticipantMessageCounts()` now also
+  returns people that add or remove events name, with a count of 0
+  (lembickit.md F15).
 - Failed sends and pending Send Later messages no longer read as sent. A message
   the owner sent with a non-zero `error` ends with `[not delivered]`, and a Send
   Later message that has not gone out (`schedule_type` 2, `is_sent` 0) ends with

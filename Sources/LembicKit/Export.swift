@@ -248,13 +248,16 @@ extension Export {
         for conversation: Conversation
     ) -> Transcript.GroupRenderInfo? {
         guard conversation.isGroup else { return nil }
-        let labels = conversation.participants.map { $0.label ?? $0.identifier }
+        let current = conversation.participants.filter { !$0.isFormer }
+        let labels = current.map { $0.label ?? $0.identifier }
+        let former = conversation.participants.filter(\.isFormer).map { $0.label ?? $0.identifier }
         // A degenerate group with an empty roster has no labels to join, so fall
         // back to the conversation's (already non-empty) displayName so the
         // `# iMessage group transcript:` header is never blank.
         let joined = labels.joined(separator: ", ")
         let name = conversation.groupName ?? (joined.isEmpty ? conversation.displayName : joined)
-        return Transcript.GroupRenderInfo(name: name, participantLabels: labels)
+        return Transcript.GroupRenderInfo(
+            name: name, participantLabels: labels, formerLabels: former)
     }
 
     /// The scope-filtered record set — the exact slice `render` feeds the

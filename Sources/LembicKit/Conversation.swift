@@ -5,7 +5,8 @@ import Foundation
 /// resolved speaker label (first name / `First L.` / formatted number) is left
 /// nil here — the label layer's helper fills it from a Contacts map; the grouping
 /// layer only stashes the raw roster so the grouping stays Contacts-free and
-/// unit-testable. "Me" is never a participant (it isn't in `chat_handle_join`).
+/// unit-testable. "Me" is never a participant: the owner's own handles are kept
+/// out of the roster (see `Conversation.ownerHandles`).
 public struct Participant: Sendable, Equatable {
     /// The participant's main handle ROWID (their most active one in the group).
     public let handleID: Int64
@@ -21,24 +22,29 @@ public struct Participant: Sendable, Equatable {
     public let handleIDs: Set<Int64>
     /// The person identity the stitch compares, the same across handles.
     let personKey: String
+    /// True for someone who wrote in the group, or was added or removed, but is
+    /// no longer in its member list. The header shows them as "(left)".
+    public var isFormer: Bool
 
     public init(
-        handleID: Int64, identifier: String, label: String? = nil, handleIDs: Set<Int64> = []
+        handleID: Int64, identifier: String, label: String? = nil, handleIDs: Set<Int64> = [],
+        isFormer: Bool = false
     ) {
         self.init(
             handleID: handleID, identifier: identifier, label: label, handleIDs: handleIDs,
-            personKey: identifier)
+            personKey: identifier, isFormer: isFormer)
     }
 
     init(
         handleID: Int64, identifier: String, label: String?, handleIDs: Set<Int64>,
-        personKey: String
+        personKey: String, isFormer: Bool = false
     ) {
         self.handleID = handleID
         self.identifier = identifier
         self.label = label
         self.handleIDs = handleIDs.union([handleID])
         self.personKey = personKey
+        self.isFormer = isFormer
     }
 }
 
@@ -112,6 +118,9 @@ public struct Conversation: Identifiable, Sendable, Equatable {
     public let groupName: String?
     /// The oldest real message across the union, when known.
     public let firstMessageDate: Date?
+    /// Handles in this conversation that belong to the owner (a second number or
+    /// email). Their messages label as "Me", and they are never participants.
+    public let ownerHandles: Set<Int64>
 
     public init(
         id: String,
@@ -128,8 +137,10 @@ public struct Conversation: Identifiable, Sendable, Equatable {
         groupName: String? = nil,
         legacyIDs: Set<String> = [],
         chatGUIDs: Set<String> = [],
-        firstMessageDate: Date? = nil
+        firstMessageDate: Date? = nil,
+        ownerHandles: Set<Int64> = []
     ) {
+        self.ownerHandles = ownerHandles
         self.id = id
         self.legacyIDs = legacyIDs
         self.chatGUIDs = chatGUIDs
@@ -189,18 +200,22 @@ public enum Conversations {
     ///
     /// `contactIDs` (`ContactsMap.ContactInfo.contactIDs`) says which handles share
     /// one Contacts card. Without it, a name alone never joins two handles.
+    /// `ownerIdentifiers` (`ContactInfo.ownerIdentifiers`) adds the Me card's
+    /// handles to the owner addresses read from the database.
     /// `region` completes numbers stored without a country code.
     public static func list(
         from db: ChatDatabase,
         resolvingContacts: Bool = true,
         contacts: [String: String]? = nil,
         contactIDs: [String: String]? = nil,
+        ownerIdentifiers: Set<String> = [],
         stitch: GroupStitch = .exact,
         region: String = ContactsMap.currentRegion()
     ) throws -> [Conversation] {
         let summaries = try db.conversationSummaries()
         var names: [String: String]
         var cards = contactIDs ?? [:]
+        var owner = ownerIdentifiers
         if let contacts {
             names = contacts
         } else if resolvingContacts {
@@ -208,6 +223,7 @@ public enum Conversations {
             let info = try? ContactsMap.buildContactInfo(region: region)
             names = info?.names ?? [:]
             if contactIDs == nil { cards = info?.contactIDs ?? [:] }
+            owner.formUnion(info?.ownerIdentifiers ?? [])
         } else {
             names = [:]
         }
@@ -243,10 +259,14 @@ public enum Conversations {
         let people = personKeys(
             handleLabels: handleLabels, personCentricIDs: try db.personCentricIDs(),
             contactIDs: cards, region: region)
+        let ownerRaw =
+            summaries.flatMap(\.ownerIdentifiers)
+            + groupSummaries.flatMap(\.ownerIdentifiers)
+        owner.formUnion(ownerRaw.map { ContactsMap.normalizeHandle($0, defaultRegion: region) })
         var groups = groupGroups(
             groupSummaries, handleLabels: handleLabels, names: names,
             participantCounts: participantCounts, personKeys: people,
-            chatLinks: try db.groupChatLinks(), region: region)
+            chatLinks: try db.groupChatLinks(), owner: owner, region: region)
 
         // The opt-in fuzzy merge: a conservative second pass that merges exact-set
         // groups representing the same group with changed membership. `.exact` (the
@@ -359,7 +379,9 @@ public enum Conversations {
     /// names conflict. Two different names never end up in one conversation.
     ///
     /// `participantCounts` (`chatID → (handleID → real-message count)`) orders the
-    /// roster most active first; ties break on the identifier.
+    /// roster most active first; ties break on the identifier. A handle in it that
+    /// is not in `chat_handle_join` is a former member. Handles whose normalized
+    /// identifier is in `owner` are the owner's, never members.
     public static func groupGroups(
         _ summaries: [ChatDatabase.GroupConversationSummary],
         handleLabels: [Int64: String] = [:],
@@ -367,6 +389,7 @@ public enum Conversations {
         participantCounts: [Int64: [Int64: Int]] = [:],
         personKeys: [Int64: String] = [:],
         chatLinks: [Int64: Set<String>] = [:],
+        owner: Set<String> = [],
         region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
         func identifier(_ handle: Int64) -> String {
@@ -374,6 +397,9 @@ public enum Conversations {
                 ?? "h\(handle)"
         }
         func person(_ handle: Int64) -> String { personKeys[handle] ?? identifier(handle) }
+        func isOwner(_ handle: Int64) -> Bool {
+            owner.contains(identifier(handle)) || owner.contains(person(handle))
+        }
 
         let rows = summaries.sorted { $0.chatID < $1.chatID }
         var components = NameAwareUnion(names: rows.map { normalizedGroupName($0.displayName) })
@@ -381,7 +407,7 @@ public enum Conversations {
         // Same people: one bucket per roster, split by name when the names conflict.
         var buckets: [[String]: [Int]] = [:]
         for (i, row) in rows.enumerated() {
-            let people = Set(row.participantHandles.map(person)).sorted()
+            let people = Set(row.participantHandles.filter { !isOwner($0) }.map(person)).sorted()
             if !people.isEmpty { buckets[people, default: []].append(i) }
         }
         for key in buckets.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
@@ -410,8 +436,8 @@ public enum Conversations {
 
         return components.groups().map { members in
             buildGroup(
-                members.map { rows[$0] }, identifier: identifier, person: person, names: names,
-                participantCounts: participantCounts)
+                members.map { rows[$0] }, identifier: identifier, person: person,
+                isOwner: isOwner, names: names, participantCounts: participantCounts)
         }
         .sorted { $0.lastMessageDate > $1.lastMessageDate }
     }
@@ -421,6 +447,7 @@ public enum Conversations {
         _ chats: [ChatDatabase.GroupConversationSummary],
         identifier: (Int64) -> String,
         person: (Int64) -> String,
+        isOwner: (Int64) -> Bool,
         names: [String: String],
         participantCounts: [Int64: [Int64: Int]]
     ) -> Conversation {
@@ -436,21 +463,23 @@ public enum Conversations {
         for chatID in chatIDs {
             for (handle, n) in participantCounts[chatID] ?? [:] { totals[handle, default: 0] += n }
         }
+        let listed = Set(chats.flatMap(\.participantHandles))
+        let seen = listed.union(totals.keys)
+        let ownerHandles = seen.filter(isOwner)
+        let allHandles = seen.subtracting(ownerHandles)
         var handlesByPerson: [String: Set<Int64>] = [:]
-        for chat in chats {
-            for handle in chat.participantHandles {
-                handlesByPerson[person(handle), default: []].insert(handle)
-            }
-        }
+        for handle in allHandles { handlesByPerson[person(handle), default: []].insert(handle) }
         var participants = handlesByPerson.map { key, handles in
-            makeParticipant(
+            var p = makeParticipant(
                 key: key, handles: handles, totals: totals, identifier: identifier, names: names)
+            p.isFormer = handles.isDisjoint(with: listed)
+            return p
         }
         sortRoster(&participants, totals: totals)
         relabel(&participants, names: names)
 
-        let allHandles = Set(chats.flatMap(\.participantHandles))
-        let rosterName = participants.map(\.identifier).sorted().joined(separator: ", ")
+        let rosterName = participants.filter { !$0.isFormer }.map(\.identifier).sorted()
+            .joined(separator: ", ")
         // An empty roster with no name falls back to the chat identifier, never "".
         let display = groupName ?? (rosterName.isEmpty ? primaryIdentifier : rosterName)
         let chatKeys = Set(chats.map { chatKey(guid: $0.guid, chatID: $0.chatID) })
@@ -468,9 +497,10 @@ public enum Conversations {
             participants: participants,
             groupName: groupName,
             legacyIDs: Set(chats.map { legacyGroupID($0.participantHandles) })
-                .union([legacyGroupID(allHandles)]),
+                .union([legacyGroupID(listed)]),
             chatGUIDs: chatKeys,
-            firstMessageDate: chats.compactMap(\.firstMessageDate).min())
+            firstMessageDate: chats.compactMap(\.firstMessageDate).min(),
+            ownerHandles: ownerHandles)
     }
 
     /// One person: their most active handle leads, and the identifier is one that
@@ -489,10 +519,12 @@ public enum Conversations {
             handleID: lead, identifier: ident, label: nil, handleIDs: handles, personKey: key)
     }
 
-    /// Most active first (summed over the person's handles), then by identifier.
+    /// Current members first, then most active (summed over the person's handles),
+    /// then by identifier.
     private static func sortRoster(_ roster: inout [Participant], totals: [Int64: Int]) {
         func volume(_ p: Participant) -> Int { p.handleIDs.reduce(0) { $0 + (totals[$1] ?? 0) } }
         roster.sort { lhs, rhs in
+            if lhs.isFormer != rhs.isFormer { return !lhs.isFormer }
             let (l, r) = (volume(lhs), volume(rhs))
             return l != r ? l > r : lhs.identifier < rhs.identifier
         }
@@ -748,11 +780,11 @@ public enum Conversations {
         return false
     }
 
-    /// The people in a group roster (one key per person, not per handle).
+    /// The current people in a group roster (one key per person, not per handle).
     static func rosterKeys(_ conversation: Conversation) -> Set<String> {
         conversation.participants.isEmpty
             ? Set(conversation.targetHandles.map { "h\($0)" })
-            : Set(conversation.participants.map(\.personKey))
+            : Set(conversation.participants.filter { !$0.isFormer }.map(\.personKey))
     }
 
     /// True when both groups were active at the same time: their date ranges
@@ -792,6 +824,8 @@ public enum Conversations {
 
         // Roster = everyone ever a member, one entry per person (their handles
         // unioned). Re-label from `names` when supplied; else keep the input labels.
+        // The newest member's current roster is the group's current roster.
+        let current = Set(byRecency[0].participants.filter { !$0.isFormer }.map(\.personKey))
         var participants: [Participant] = []
         var indexByPerson: [String: Int] = [:]
         for member in byRecency {
@@ -800,16 +834,23 @@ public enum Conversations {
                     let kept = participants[i]
                     participants[i] = Participant(
                         handleID: kept.handleID, identifier: kept.identifier, label: kept.label,
-                        handleIDs: kept.handleIDs.union(p.handleIDs), personKey: kept.personKey)
+                        handleIDs: kept.handleIDs.union(p.handleIDs), personKey: kept.personKey,
+                        isFormer: kept.isFormer)
                 } else {
+                    var added = p
+                    added.isFormer = !current.contains(p.personKey)
                     indexByPerson[p.personKey] = participants.count
-                    participants.append(p)
+                    participants.append(added)
                 }
             }
         }
+        participants = participants.filter { !$0.isFormer } + participants.filter(\.isFormer)
         relabel(&participants, names: names)
         let identifiers = Set(participants.map(\.identifier))
-        let display = groupName ?? identifiers.sorted().joined(separator: ", ")
+        let display =
+            groupName
+            ?? Set(participants.filter { !$0.isFormer }.map(\.identifier)).sorted()
+            .joined(separator: ", ")
 
         let chatKeys = members.reduce(into: Set<String>()) { $0.formUnion($1.chatGUIDs) }
         return Conversation(
@@ -829,7 +870,8 @@ public enum Conversations {
                 $0.formUnion($1.legacyIDs)
             },
             chatGUIDs: chatKeys,
-            firstMessageDate: members.compactMap(\.firstMessageDate).min())
+            firstMessageDate: members.compactMap(\.firstMessageDate).min(),
+            ownerHandles: members.reduce(into: Set<Int64>()) { $0.formUnion($1.ownerHandles) })
     }
 
     /// Per-thread group speaker labels: a group's roster + a

@@ -35,6 +35,9 @@ public enum ContactsMap {
         /// Normalized handle to `CNContact.identifier`. Two handles on one card are
         /// one person; two cards with the same name are not.
         public let contactIDs: [String: String]
+        /// The owner's own normalized handles, from the Me card. Empty when there is
+        /// no Me card (and for vCard input).
+        public let ownerIdentifiers: Set<String>
     }
 
     /// `region` (ISO 3166-1 alpha-2) completes numbers saved without a country code.
@@ -72,8 +75,14 @@ public enum ContactsMap {
         let request = CNContactFetchRequest(keysToFetch: keys)
 
         var maps = Maps()
-        try CNContactStore().enumerateContacts(with: request) { contact, _ in
+        let store = CNContactStore()
+        try store.enumerateContacts(with: request) { contact, _ in
             record(contact, photo: contact.thumbnailImageData, region: region, into: &maps)
+        }
+        if let me = try? store.unifiedMeContactWithKeys(
+            toFetch: [CNContactPhoneNumbersKey, CNContactEmailAddressesKey] as [CNKeyDescriptor])
+        {
+            maps.owner = handles(of: me, region: region)
         }
         return maps.info
     }
@@ -103,9 +112,18 @@ public enum ContactsMap {
         var names: [String: String] = [:]
         var avatars: [String: Data] = [:]
         var contactIDs: [String: String] = [:]
+        var owner = Set<String>()
         var info: ContactInfo {
-            ContactInfo(names: names, avatars: avatars, contactIDs: contactIDs)
+            ContactInfo(
+                names: names, avatars: avatars, contactIDs: contactIDs, ownerIdentifiers: owner)
         }
+    }
+
+    private static func handles(of contact: CNContact, region: String) -> Set<String> {
+        let phones = contact.phoneNumbers.compactMap {
+            normalizePhone($0.value.stringValue, defaultRegion: region)
+        }
+        return Set(phones + contact.emailAddresses.map { ($0.value as String).lowercased() })
     }
 
     /// Fold one contact's name + photo into the maps under each of its normalized
