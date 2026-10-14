@@ -8,6 +8,16 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `Conversation.id` is now stable: `chat:` plus the smallest `chat.guid` in the
+  conversation. A contact rename, a Contacts grant or revoke, a group rename, or a
+  member change no longer moves it, so per-conversation saved data stays attached.
+  The 0.3.1 keys (contact name, bare identifier, `group:<handle ROWIDs>`) are in the
+  new `Conversation.legacyIDs` for migration, and every chat's GUID is in
+  `Conversation.chatGUIDs`. `ConversationSummary` and `GroupConversationSummary`
+  carry the new `guid` field (bugs.md #5, redaction.md F10).
+
 ### Fixed
 
 - macOS 14 databases export again. The schema guard now fails closed only on the

@@ -193,10 +193,12 @@ public final class ChatDatabase: @unchecked Sendable {
         public let handleID: Int64
         public let lastMessageDate: Date  // most-recent *real* message (recency sort)
         public let messageCount: Int  // real messages (reactions/system excluded)
+        /// `chat.guid`: stable across renames, Contacts changes, and member changes.
+        public let guid: String?
 
         public init(
             chatID: Int64, identifier: String?, service: String?,
-            handleID: Int64, lastMessageDate: Date, messageCount: Int
+            handleID: Int64, lastMessageDate: Date, messageCount: Int, guid: String? = nil
         ) {
             self.chatID = chatID
             self.identifier = identifier
@@ -204,6 +206,7 @@ public final class ChatDatabase: @unchecked Sendable {
             self.handleID = handleID
             self.lastMessageDate = lastMessageDate
             self.messageCount = messageCount
+            self.guid = guid
         }
     }
 
@@ -224,6 +227,7 @@ public final class ChatDatabase: @unchecked Sendable {
                            COALESCE(\(cols.column("c", "chat", "chat_identifier")),
                                     \(cols.column("h", "handle", "id"))) ident,
                            \(cols.column("c", "chat", "service_name")) svc,
+                           \(cols.column("c", "chat", "guid")) cguid,
                            chj.handle_id hid, MAX(m.date) lastDate, COUNT(*) cnt
                     FROM chat c
                     JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
@@ -243,7 +247,8 @@ public final class ChatDatabase: @unchecked Sendable {
                     handleID: row["hid"] ?? 0,
                     lastMessageDate: Date(
                         timeIntervalSince1970: Double(ns) / 1e9 + Extractor.appleEpochOffset),
-                    messageCount: row["cnt"] ?? 0)
+                    messageCount: row["cnt"] ?? 0,
+                    guid: row["cguid"])
             }
         }
     }
@@ -265,10 +270,13 @@ public final class ChatDatabase: @unchecked Sendable {
         public let lastMessageDate: Date  // most-recent *real* message (recency sort)
         public let messageCount: Int  // real messages (reactions/system excluded)
         public let participantHandles: [Int64]  // sorted handle ROWIDs (the set key)
+        /// `chat.guid`: stable across renames, Contacts changes, and member changes.
+        public let guid: String?
 
         public init(
             chatID: Int64, identifier: String?, service: String?, displayName: String?,
-            lastMessageDate: Date, messageCount: Int, participantHandles: [Int64]
+            lastMessageDate: Date, messageCount: Int, participantHandles: [Int64],
+            guid: String? = nil
         ) {
             self.chatID = chatID
             self.identifier = identifier
@@ -277,6 +285,7 @@ public final class ChatDatabase: @unchecked Sendable {
             self.lastMessageDate = lastMessageDate
             self.messageCount = messageCount
             self.participantHandles = participantHandles
+            self.guid = guid
         }
     }
 
@@ -314,6 +323,7 @@ public final class ChatDatabase: @unchecked Sendable {
                     SELECT c.ROWID cid, \(cols.column("c", "chat", "chat_identifier")) ident,
                            \(cols.column("c", "chat", "service_name")) svc,
                            \(cols.column("c", "chat", "display_name")) dname,
+                           \(cols.column("c", "chat", "guid")) cguid,
                            MAX(m.date) lastDate, COUNT(*) cnt
                     FROM chat c
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
@@ -334,7 +344,8 @@ public final class ChatDatabase: @unchecked Sendable {
                     lastMessageDate: Date(
                         timeIntervalSince1970: Double(ns) / 1e9 + Extractor.appleEpochOffset),
                     messageCount: row["cnt"] ?? 0,
-                    participantHandles: (rosters[cid] ?? []).sorted())
+                    participantHandles: (rosters[cid] ?? []).sorted(),
+                    guid: row["cguid"])
             }
         }
     }
@@ -404,7 +415,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// Columns read when present. A missing one degrades one feature (a NULL is
     /// selected in its place), never the whole export. Keep in lockstep with the SQL.
     public static let optionalSchema: [(table: String, columns: [String])] = [
-        ("chat", ["chat_identifier", "service_name", "display_name"]),
+        ("chat", ["guid", "chat_identifier", "service_name", "display_name"]),
         (
             "message",
             [

@@ -27,7 +27,8 @@ struct ConversationGroupingTests {
             ], contacts: aliceContacts)
         #expect(union.count == 1, "phone + email under one contact → one Conversation")
         if let alice = union.first {
-            #expect(alice.id == "Alice", "union id is the resolved contact name")
+            #expect(alice.id == "chat:rowid:1", "union id is the smallest chat key")
+            #expect(alice.legacyIDs.contains("Alice"), "the 0.3.1 id (the name) is kept")
             #expect(alice.displayName == "Alice", "union displayName is the contact name")
             #expect(alice.isContact, "resolved contact → isContact true")
             #expect(alice.chatIDs == [1, 2], "union chatIDs = both rows")
@@ -54,8 +55,8 @@ struct ConversationGroupingTests {
                 && strangers.contains { $0.displayName == "+18162222222" },
             "displayName is the raw normalized identifier (engine never pretty-prints)")
         #expect(
-            strangers.allSatisfy { $0.id == $0.displayName },
-            "unknown number: id == its normalized identifier")
+            strangers.allSatisfy { $0.legacyIDs == [$0.displayName] },
+            "unknown number: the 0.3.1 id is its normalized identifier")
     }
 
     @Test func recencyOrdering() {
@@ -69,7 +70,7 @@ struct ConversationGroupingTests {
             ],
             contacts: ["+18163333333": "Bob", "b@b.com": "Bob"])
         #expect(recency.count == 2, "Bob's two identifiers union; the stranger stands alone")
-        if let bob = recency.first(where: { $0.id == "Bob" }) {
+        if let bob = recency.first(where: { $0.displayName == "Bob" }) {
             #expect(
                 bob.primaryIdentifier == "b@b.com",
                 "primaryIdentifier = the newest row's normalized identifier")
@@ -78,7 +79,7 @@ struct ConversationGroupingTests {
                 "lastMessageDate = the newest row's date")
         }
         #expect(
-            recency.first?.id == "Bob",
+            recency.first?.displayName == "Bob",
             "newest-first: Bob (last @500) sorts above the stranger (@300)")
     }
 

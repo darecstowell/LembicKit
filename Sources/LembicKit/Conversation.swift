@@ -43,10 +43,18 @@ public struct Participant: Sendable, Equatable {
 /// are UI concerns a caller layers on (e.g. reading `avatars[identifier]` from
 /// `ContactsMap.ContactInfo` and pretty-printing bare numbers itself).
 public struct Conversation: Identifiable, Sendable, Equatable {
-    /// Stable key: the resolved contact name when known (so a person's phone +
-    /// email chats share one id), else the normalized identifier (each unknown
-    /// number stands alone).
+    /// Stable key: `chat:` plus the smallest of `chatGUIDs`. A rename, a Contacts
+    /// change, or a member change does not move it. When chats regroup, the new
+    /// conversation keeps the id of one of its chats; see `chatGUIDs`.
     public let id: String
+    /// Every key 0.3.1 could have used as `id` for this conversation (contact
+    /// name, bare identifiers, `group:<handle ROWIDs>`). Migration only: two
+    /// conversations can share one.
+    public let legacyIDs: Set<String>
+    /// The `chat.guid` of every chat in the union (`rowid:<ROWID>` when the column
+    /// is missing). Saved state keyed `chat:<g>` for any `g` here belongs to this
+    /// conversation.
+    public let chatGUIDs: Set<String>
     /// Display label: the resolved contact name, else the normalized identifier
     /// (raw E.164 / email — the engine does NOT pretty-print; that's a UI concern).
     public let displayName: String
@@ -97,9 +105,13 @@ public struct Conversation: Identifiable, Sendable, Equatable {
         isContact: Bool,
         isGroup: Bool = false,
         participants: [Participant] = [],
-        groupName: String? = nil
+        groupName: String? = nil,
+        legacyIDs: Set<String> = [],
+        chatGUIDs: Set<String> = []
     ) {
         self.id = id
+        self.legacyIDs = legacyIDs
+        self.chatGUIDs = chatGUIDs
         self.displayName = displayName
         self.chatIDs = chatIDs
         self.targetHandles = targetHandles
@@ -235,6 +247,7 @@ public enum Conversations {
     ) -> [Conversation] {
         struct Acc {
             var chatIDs = Set<Int64>()
+            var chatKeys = Set<String>()
             var handles = Set<Int64>()
             var identifiers = Set<String>()
             var last = Date.distantPast
@@ -250,6 +263,7 @@ public enum Conversations {
             let key = name ?? norm
             var acc = groups[key] ?? Acc()
             acc.chatIDs.insert(s.chatID)
+            acc.chatKeys.insert(chatKey(guid: s.guid, chatID: s.chatID))
             acc.handles.insert(s.handleID)
             acc.identifiers.insert(norm)
             acc.count += s.messageCount
@@ -271,7 +285,7 @@ public enum Conversations {
                 var handles = a.handles
                 for id in a.identifiers { handles.formUnion(handlesByIdentifier[id] ?? []) }
                 return Conversation(
-                    id: key,
+                    id: stableID(a.chatKeys),
                     displayName: a.name ?? key,
                     chatIDs: a.chatIDs,
                     targetHandles: handles,
@@ -279,7 +293,9 @@ public enum Conversations {
                     lastMessageDate: a.last,
                     messageCount: a.count,
                     primaryIdentifier: a.number.isEmpty ? key : a.number,
-                    isContact: a.name != nil)
+                    isContact: a.name != nil,
+                    legacyIDs: a.identifiers.union(a.name.map { [$0] } ?? []),
+                    chatGUIDs: a.chatKeys)
             }
             .sorted { $0.lastMessageDate > $1.lastMessageDate }
     }
@@ -319,6 +335,7 @@ public enum Conversations {
     ) -> [Conversation] {
         struct Acc {
             var chatIDs = Set<Int64>()
+            var chatKeys = Set<String>()
             var handleSet: [Int64] = []  // the sorted set key (shared by the fork)
             var last = Date.distantPast
             var count = 0
@@ -338,6 +355,7 @@ public enum Conversations {
                 : handles.map(String.init).joined(separator: ",")
             var acc = groups[key] ?? Acc()
             acc.chatIDs.insert(s.chatID)
+            acc.chatKeys.insert(chatKey(guid: s.guid, chatID: s.chatID))
             acc.handleSet = handles
             acc.count += s.messageCount
             // Keep the first non-nil display name across the fork (a re-created
@@ -394,7 +412,7 @@ public enum Conversations {
                 let rosterName = identifiers.sorted().joined(separator: ", ")
                 let display = a.groupName ?? (rosterName.isEmpty ? a.primaryIdentifier : rosterName)
                 return Conversation(
-                    id: "group:" + a.handleSet.map(String.init).joined(separator: ","),
+                    id: stableID(a.chatKeys),
                     displayName: display,
                     chatIDs: a.chatIDs,
                     targetHandles: Set(a.handleSet),
@@ -405,9 +423,27 @@ public enum Conversations {
                     isContact: false,
                     isGroup: true,
                     participants: participants,
-                    groupName: a.groupName)
+                    groupName: a.groupName,
+                    legacyIDs: [legacyGroupID(a.handleSet)],
+                    chatGUIDs: a.chatKeys)
             }
             .sorted { $0.lastMessageDate > $1.lastMessageDate }
+    }
+
+    /// The per-chat key behind `Conversation.chatGUIDs`.
+    static func chatKey(guid: String?, chatID: Int64) -> String {
+        if let guid, !guid.isEmpty { return guid }
+        return "rowid:\(chatID)"
+    }
+
+    /// `chat:` plus the smallest chat key, so it never depends on ROWID order.
+    static func stableID(_ chatKeys: Set<String>) -> String {
+        "chat:" + (chatKeys.min() ?? "")
+    }
+
+    /// The 0.3.1 group id: `group:` plus the sorted handle ROWIDs.
+    static func legacyGroupID(_ handles: some Sequence<Int64>) -> String {
+        "group:" + handles.sorted().map(String.init).joined(separator: ",")
     }
 
     // MARK: - Opt-in fuzzy / membership-change stitching
@@ -607,8 +643,9 @@ public enum Conversations {
         let identifiers = Set(participants.map(\.identifier))
         let display = groupName ?? identifiers.sorted().joined(separator: ", ")
 
+        let chatKeys = members.reduce(into: Set<String>()) { $0.formUnion($1.chatGUIDs) }
         return Conversation(
-            id: "group:" + targetHandles.sorted().map(String.init).joined(separator: ","),
+            id: stableID(chatKeys),
             displayName: display,
             chatIDs: chatIDs,
             targetHandles: targetHandles,
@@ -619,7 +656,11 @@ public enum Conversations {
             isContact: false,
             isGroup: true,
             participants: participants,
-            groupName: groupName)
+            groupName: groupName,
+            legacyIDs: members.reduce(into: [legacyGroupID(targetHandles)]) {
+                $0.formUnion($1.legacyIDs)
+            },
+            chatGUIDs: chatKeys)
     }
 
     /// Per-thread group speaker labels: a group's roster + a
