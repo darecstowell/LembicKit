@@ -215,6 +215,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 - Email scrubber finds obfuscated, spaced, and IDN addresses. The phone scrubber
   no longer removes year ranges or labeled serial numbers; the address scrubber
   no longer removes `CA-90210` style codes (F25).
+- A seconds-era `message.date` too large to scale to nanoseconds is an unknown
+  date, in Swift and in the SQL sort, instead of wrapping to a wrong date.
 
 ### Performance
 

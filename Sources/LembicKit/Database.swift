@@ -112,9 +112,10 @@ public final class ChatDatabase: @unchecked Sendable {
         try read { db in
             // One b-tree pass for the min/max of the real (date > 0) rows; the
             // `date == 0` sentinel rows are excluded so the floor is a real message.
+            let known = Extractor.knownDate("date")
             guard
                 let row = try Row.fetchOne(
-                    db, sql: "SELECT MIN(date) lo, MAX(date) hi FROM message WHERE date > 0")
+                    db, sql: "SELECT MIN(date) lo, MAX(date) hi FROM message WHERE \(known)")
             else { return (nil, nil) }
             // Both are NULL together (no qualifying rows) or both present.
             let lo: Int64? = row["lo"]
@@ -352,7 +353,7 @@ public final class ChatDatabase: @unchecked Sendable {
                            \(cols.column("c", "chat", "display_name")) dname,
                            \(cols.column("c", "chat", "guid")) cguid,
                            \(cols.column("c", "chat", "group_id")) gid,
-                           MIN(CASE WHEN m.date > 0 THEN m.date END) firstDate,
+                           MIN(CASE WHEN \(Extractor.knownDate("m.date")) THEN m.date END) firstDate,
                            MAX(\(Self.sentDate(cols))) lastDate, COUNT(*) cnt,
                            \(Self.ownerAddresses(cols)) me
                     FROM chat c
@@ -497,7 +498,8 @@ public final class ChatDatabase: @unchecked Sendable {
     static func sentDate(_ cols: SchemaColumns) -> String {
         let type = cols.column("m", "message", "schedule_type")
         let sent = cols.column("m", "message", "is_sent")
-        return "CASE WHEN \(type) = 2 AND COALESCE(\(sent), 0) = 0 THEN NULL ELSE m.date END"
+        return "CASE WHEN \(type) = 2 AND COALESCE(\(sent), 0) = 0 THEN NULL"
+            + " WHEN \(Extractor.knownDate("m.date")) THEN m.date END"
     }
 
     // MARK: - Schema-sanity guard
