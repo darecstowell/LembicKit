@@ -221,6 +221,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   message once per row, and its summary uses the smallest handle ROWID.
 - Conversations with the same last-message date sort by `id`, so the list
   order no longer changes from run to run.
+- `lembic-cli export` (direct, `--union`, and `--sample`) renders the listed
+  conversation through `Export.render`, so a note to self drops its echoes and a
+  group chat gets per-speaker labels and the group header. With `--contacts` it
+  reads Contacts once and hands the names to the new `Export.useContacts(_:)`.
 
 ### Performance
 

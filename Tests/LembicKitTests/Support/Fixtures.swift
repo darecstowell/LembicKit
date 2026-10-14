@@ -336,6 +336,11 @@ enum Fixtures {
     /// the temp file alive for the DB's lifetime (these fixtures are tiny and the
     /// OS reaps the temp dir).
     static func openChatDB(populating sql: String) throws -> ChatDatabase {
+        try ChatDatabase(at: writeChatDB(populating: sql))  // opens in place, read-only
+    }
+
+    /// Write the fixture to a temp `chat.db` file and return its URL.
+    static func writeChatDB(populating sql: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("lembic-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -346,7 +351,6 @@ enum Fixtures {
             let q = try DatabaseQueue(path: path.path)
             try q.write { try $0.execute(sql: sql) }
         }
-        let db = try ChatDatabase(at: path)  // opens in place, read-only
-        return db
+        return path
     }
 }

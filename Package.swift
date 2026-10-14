@@ -32,6 +32,7 @@ let package = Package(
             name: "LembicKitTests",
             dependencies: [
                 "LembicKit",
+                "lembic-cli",
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
             path: "Tests/LembicKitTests",

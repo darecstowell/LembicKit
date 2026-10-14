@@ -69,6 +69,14 @@ public final class Export: @unchecked Sendable {
         cachedLabels[resolveContacts] = resolved
         return resolved
     }
+
+    /// Use `names` (normalized handle to name) for every later render that resolves
+    /// Contacts, so a caller that already read Contacts does not read them again.
+    public func useContacts(_ names: [String: String]) throws {
+        let handleLabels = try database.handleLabels()
+        let resolved = ContactsMap.resolve(handleLabels: handleLabels, contacts: names).resolved
+        cachedLabels[true] = resolved
+    }
 }
 
 // MARK: - Rendering — one call, a format set, detection auto-run by default
