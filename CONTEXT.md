@@ -72,7 +72,10 @@ These are the core nouns, drawn from the actual type names.
 | `RedactionAnchor.swift` | Saved redactions with a keyed fingerprint of the covered text, so a changed message moves the anchor or hides the whole message | `RedactionAnchor`, `RedactionSet.anchors(in:key:)`, `RedactionSet.resolve(_:records:key:)` |
 | `BodySplice.swift` | The one body-splice path, the source-to-output UTF-16 offset map, and the normalized-to-source map | `BodySplice`, `OffsetMap`, `NormalizedText` (internal) |
 | `SecretDetector.swift` | On-device detection of high-harm secrets (flag for review): the per-record loop, message joins, answers, and flag merging | `SecretDetector.detect` |
-| `DetectorRules.swift` | The per-message detector rules and their cheap gates | `DetectorScan`, `TextProfile` (internal) |
+| `DetectorRules.swift` | The per-message scan and its ordered rule table (category, gate, rule) | `DetectorScan`, `DetectorScan.rules` (internal) |
+| `Detectors/*.swift` | One file per category group (`Cards`, `Bank`, `GovernmentIDs`, `Passwords`, `APIKeys`, `RecoveryAndSeeds`, `Codes`): the regexes, keywords, and rule for each, as `DetectorScan` extensions | `DetectorScan` (internal) |
+| `Detectors/Checksums.swift` | Pure validators: Luhn, issuer table, SSN shape, mod-97, ABA, TFN, CPF, NIR, NHS, Verhoeff, codice fiscale | `DetectorScan.luhn` and others (internal) |
+| `Detectors/TextProfile.swift` | One pass over a body for the counts the gates use | `TextProfile` (internal) |
 | `TextNormalizer.swift` | A detection copy of a body with odd characters undone | `TextNormalizer` (internal) |
 | `SecretScrubber.swift` | On-device opt-in auto-remove of ubiquitous PII | `SecretScrubber.scrub` |
 | `NameMatcher.swift` | Finds known names and name parts in message text for anonymize | `NameMatcher` (internal), `Export.knownNames(for:labels:adding:)` |
@@ -148,7 +151,7 @@ Fixtures: tests build in-memory SQLite databases from the schema strings in `Tes
 
 ## Extension points
 
-**Add a new detector.** Add a case to `SecretCategory` in `Redaction.swift`, add a rule function and its `static let` regex(es) to `DetectorScan` in `DetectorRules.swift`, and call it from `run()` under an `enabled.contains(.x)` guard and a gate that only skips text the rule cannot match. Add cases to the tune corpus in `Tests/LembicKitTests/Fixtures/redaction-corpus` (never to a `heldout-` set) and raise the floors in `RedactionCorpusTests`. Keep the alert-fatigue floor: do not add ubiquitous-PII detection here. Anything self-validating (a checksum) needs no context keyword; anything common (like the routing number) should require a nearby keyword. Add tests to `SecretDetectorTests.swift` including a false-positive guard.
+**Add a new detector.** Add a case to `SecretCategory` in `Redaction.swift`, add the rule function and its `static let` regex(es) in a `DetectorScan` extension in `Sources/LembicKit/Detectors/` (the file for its category group, or a new one), and put any pure validator in `Detectors/Checksums.swift` with a direct test in `ChecksumTests.swift`. Add one row to `DetectorScan.rules` in `DetectorRules.swift` at the place it should run: the category, a gate that only skips text the rule cannot match, and the rule. Add cases to the tune corpus in `Tests/LembicKitTests/Fixtures/redaction-corpus` (never to a `heldout-` set) and raise the floors in `RedactionCorpusTests`. Keep the alert-fatigue floor: do not add ubiquitous-PII detection here. Anything self-validating (a checksum) needs no context keyword; anything common (like the routing number) should require a nearby keyword. Add tests to `SecretDetectorTests.swift` including a false-positive guard.
 
 **Add a new scrubber category.** Add a case to `ScrubberCategory` in `Redaction.swift`, add the matcher in `SecretScrubber.swift` (an `NSDataDetector` type or a regex), and call it inside `SecretScrubber.scrub` under a `categories.contains(.x)` guard. It must default off (the toggle is the consent) and emit `Redaction` spans over the leaking value only. Add tests to `SecretScrubberTests.swift`, including the default-off proof.
 
