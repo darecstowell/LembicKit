@@ -10,6 +10,9 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Changed
 
+- JSONL `"d"` is ISO 8601 with the UTC offset (`2026-11-01T01:10:00-06:00`),
+  not a bare local time, so a DST fall-back hour sorts and reads correctly
+  (lembickit.md F24).
 - `Conversation.id` is now stable: `chat:` plus the smallest `chat.guid` in the
   conversation. A contact rename, a Contacts grant or revoke, a group rename, or a
   member change no longer moves it, so per-conversation saved data stays attached.
@@ -34,6 +37,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- The transcript names its time zone, and a DST fall-back hour no longer reads
+  out of order. The header says `# Times are local (America/Chicago), 24h.`
+  (the zone is left out when anonymizing), and a clock time that happens twice
+  shows its zone, for example `01:30 CDT` then `01:10 CST` (lembickit.md F24).
 - An unsent message leaves a trace, and its text never surfaces. The extractor
   reads the `rp` key of `message_summary_info` as well as `date_retracted`. A
   fully unsent message is one `[unsent a message]` line

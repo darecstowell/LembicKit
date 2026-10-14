@@ -3,7 +3,7 @@
 # Participants: Me = the account owner · Alice · Bob · (844) 399-6927
 # Reactions shown as [Alice: ❤️] after the message they target.
 # Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
-# Times are local, 24h. Section headers are calendar days.
+# Times are local (America/Chicago), 24h. Section headers are calendar days.
 
 
 ## 2023-11-14 (Tue)

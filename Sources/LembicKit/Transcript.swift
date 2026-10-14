@@ -110,6 +110,26 @@ public enum Transcript {
             .trimmingCharacters(in: Extractor.pythonWhitespace)
     }
 
+    /// Each DST fall-back hour between two dates: the instants whose local clock
+    /// time happens twice.
+    static func repeatedHours(from start: Date, to end: Date, in timeZone: TimeZone)
+        -> [Range<Date>]
+    {
+        var windows: [Range<Date>] = []
+        var cursor = start.addingTimeInterval(-86_400)
+        while let change = timeZone.nextDaylightSavingTimeTransition(after: cursor),
+            change <= end.addingTimeInterval(86_400)
+        {
+            let before = timeZone.secondsFromGMT(for: change.addingTimeInterval(-1))
+            let shift = TimeInterval(before - timeZone.secondsFromGMT(for: change))
+            if shift > 0 {
+                windows.append(change.addingTimeInterval(-shift)..<change.addingTimeInterval(shift))
+            }
+            cursor = change
+        }
+        return windows
+    }
+
     static func formatter(_ format: String, timeZone: TimeZone = .current) -> DateFormatter {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -614,7 +634,8 @@ public enum Transcript {
                 "# Attachments shown as typed placeholders: [photo] [video] [gif] "
                 + "[audio] [pdf] [contact] [shared location].\n"
         }
-        out += "# Times are local, 24h. Section headers are calendar days.\n\n"
+        let zoneName = anonymize ? "" : " (\(timeZone.identifier))"
+        out += "# Times are local\(zoneName), 24h. Section headers are calendar days.\n\n"
 
         // ---- Phase 2: emit day-grouped body, applying redactions + collecting marks.
         var spans: [RenderSpan] = []
@@ -633,6 +654,20 @@ public enum Transcript {
         // pass scrubs. Sorted so the merge with the message stream is stable.
         let pendingEvents = (renderGroup ? systemEvents : []).sorted { $0.date < $1.date }
         var eventIndex = 0
+        // A clock time inside a DST fall-back hour happens twice, so it names its zone.
+        let dates = [
+            emit.first?.date, emit.last?.date, pendingEvents.first?.date,
+            pendingEvents.last?.date,
+        ].compactMap { $0 }
+        let repeated =
+            dates.min().map {
+                repeatedHours(from: $0, to: dates.max() ?? $0, in: timeZone)
+            } ?? []
+        let zone = formatter("HH:mm zzz", timeZone: timeZone)
+        func clock(_ date: Date) -> String {
+            repeated.contains { $0.contains(date) }
+                ? zone.string(from: date) : time.string(from: date)
+        }
         // Open the day section for `date` if it isn't the current one — shared by
         // the message loop and the event flush so an event that starts a new day
         // gets its own `## YYYY-MM-DD` header.
@@ -652,7 +687,7 @@ public enum Transcript {
                 let ev = pendingEvents[eventIndex]
                 if let boundary, ev.date > boundary { break }
                 openDaySection(for: ev.date)
-                acc.append("\(time.string(from: ev.date)) — \(ev.line)\n")
+                acc.append("\(clock(ev.date)) — \(ev.line)\n")
                 eventIndex += 1
             }
         }
@@ -734,7 +769,7 @@ public enum Transcript {
             // Append the line, recording the body's output range. `bodyStart` is
             // measured AFTER the (possibly anonymized) prefix, so redaction /
             // highlight output ranges stay correct regardless of label length.
-            let prefix = "\(time.string(from: r.date)) \(alias(r.speaker)): "
+            let prefix = "\(clock(r.date)) \(alias(r.speaker)): "
             acc.append(prefix)
             let bodyStart = acc.length
             acc.append(indented)
@@ -818,7 +853,7 @@ public enum Transcript {
         anonymize: Bool = false,
         timeZone: TimeZone = .current
     ) -> String {
-        let full = formatter("yyyy-MM-dd HH:mm:ss", timeZone: timeZone)
+        let full = formatter("yyyy-MM-dd'T'HH:mm:ssxxx", timeZone: timeZone)
         // Same speaker → "Person N" map the .txt path uses, so the two outputs
         // label identically. Empty when not anonymizing (lookups fall through).
         let aliases = anonymize ? anonymizationMap(for: records) : [:]
