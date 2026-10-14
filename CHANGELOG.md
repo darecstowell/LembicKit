@@ -84,6 +84,13 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Added
 
+- `Export.ScopeRenderer`: holds one extracted conversation and renders any
+  scope with the same result as `Export.render(records:...)`, but finds the
+  detector and scrubber hits once. A caller that re-renders as a date range
+  changes no longer runs the detectors on each change. Build it from records
+  and render inputs, or from records, a `Conversation`, and its labels.
+  `cancel()` stops a pass in progress; later renders throw `CancellationError`.
+- `Transcript.RenderResult.empty`, the result of an empty scope.
 - `ChatDatabase.changeToken()`: moves on any commit (an edit, an unsend, or a
   delete, not only a new row), so a live view can refresh. `messageWatermark()`
   still works but misses changes that add no row (lembickit.md F20).
