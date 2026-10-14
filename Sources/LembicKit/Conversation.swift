@@ -279,7 +279,12 @@ public enum Conversations {
             groups = fuzzyMerge(groups, names: names)
         }
 
-        return (oneToOnes + groups).sorted { $0.lastMessageDate > $1.lastMessageDate }
+        return (oneToOnes + groups).sorted(by: newestFirst)
+    }
+
+    /// Newest first; equal dates order by `id` so the list is stable.
+    static func newestFirst(_ a: Conversation, _ b: Conversation) -> Bool {
+        a.lastMessageDate != b.lastMessageDate ? a.lastMessageDate > b.lastMessageDate : a.id < b.id
     }
 
     /// One-shot convenience for a CLI / script: open + preflight + list, owning
@@ -383,7 +388,7 @@ public enum Conversations {
                     chatGUIDs: a.chatKeys,
                     isNoteToSelf: !a.identifiers.isEmpty && a.identifiers.isSubset(of: owner))
             }
-            .sorted { $0.lastMessageDate > $1.lastMessageDate }
+            .sorted(by: newestFirst)
     }
 
     // MARK: - Group exact-set stitch
@@ -463,7 +468,7 @@ public enum Conversations {
                 members.map { rows[$0] }, identifier: identifier, person: person,
                 isOwner: isOwner, names: names, participantCounts: participantCounts)
         }
-        .sorted { $0.lastMessageDate > $1.lastMessageDate }
+        .sorted(by: newestFirst)
     }
 
     /// One stitched group conversation from its chats.
@@ -728,12 +733,7 @@ public enum Conversations {
 
         // Stable order so clique assignment is deterministic regardless of input
         // order: newest first, then by id.
-        let nodes = groupChats.sorted {
-            if $0.lastMessageDate != $1.lastMessageDate {
-                return $0.lastMessageDate > $1.lastMessageDate
-            }
-            return $0.id < $1.id
-        }
+        let nodes = groupChats.sorted(by: newestFirst)
 
         // Precompute pairwise "same group?" once.
         var related = Array(
