@@ -86,7 +86,7 @@ struct ExportSeamTests {
             records: recs, number: "+1", formats: [.txt],
             scope: .init(dateRange: mid...mid))
         #expect(scoped.messageCount == 1, "date range filters to the in-range set")
-        #expect(scoped.records.map(\.guid) == ["g1"], "scope keeps exactly the in-range record")
+        #expect(scoped.unredactedRecords.map(\.guid) == ["g1"], "scope keeps exactly the in-range record")
     }
 
     @Test func emptyScopeContract() {

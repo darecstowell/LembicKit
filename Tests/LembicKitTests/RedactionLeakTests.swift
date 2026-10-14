@@ -177,7 +177,7 @@ struct RedactionLeakTests {
         #expect(pro.map(\.speaker) == ["Member 1", "Alice"])
         #expect(pro.flatMap(\.reactions).map(\.by) == ["Member 2", "Member 1"])
         #expect(
-            Export.preparedRecords(records, scope: scope).map(\.speaker) == ["Member 1", "Alice"])
+            Export.unredactedPreparedRecords(records, scope: scope).map(\.speaker) == ["Member 1", "Alice"])
     }
 
     @Test("scrubbers off: labels and header are unchanged")
@@ -315,5 +315,31 @@ struct RedactionLeakTests {
             scope: Export.Scope(showSystemEvents: true, enabledDetectors: []), group: group,
             systemEvents: events)
         #expect(off.txt?.contains(secret) == true, "with every detector off, nothing changes")
+    }
+
+    @Test("F32: no output format and no redacted accessor holds a redacted value")
+    func everyFormatIsRedacted() {
+        let secret = "Hunter2" + "!x"
+        let phone = "(816) 555-" + "0142"
+        let records = [
+            Fixtures.exportRec(1, "Them", "pw is " + secret),
+            Fixtures.exportRec(2, "Them", "call me at " + phone),
+        ]
+        var reds = RedactionSet()
+        reds.add(Redaction(guid: "g1", range: nil))
+        let scope = Export.Scope(enabledScrubbers: [.phone])
+        for format in Export.Format.allCases {
+            let out = Export.render(
+                records: records, number: "+18165550100", formats: [format], scope: scope,
+                redactions: reds)
+            let text = (format == .txt ? out.txt : out.jsonl) ?? ""
+            #expect(!text.isEmpty)
+            #expect(!text.contains(secret), "\(format)")
+            #expect(!text.contains(phone), "\(format)")
+        }
+        let prepared = Export.preparedRedactedRecords(records, scope: scope, redactions: reds)
+            .map(\.text).joined(separator: "\n")
+        #expect(!prepared.contains(secret))
+        #expect(!prepared.contains(phone))
     }
 }

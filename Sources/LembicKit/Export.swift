@@ -159,8 +159,13 @@ extension Export {
         public let jsonl: String?
         public let result: Transcript.RenderResult?
         public let detected: [DetectedSecret]
-        public let records: [MessageRecord]
+        /// The rendered records with message text NOT redacted. For counts and names only;
+        /// output text must come from `txt`, `jsonl`, or `preparedRedactedRecords`.
+        public let unredactedRecords: [MessageRecord]
         public let messageCount: Int
+
+        @available(*, deprecated, renamed: "unredactedRecords")
+        public var records: [MessageRecord] { unredactedRecords }
 
         public init(
             txt: String?,
@@ -174,7 +179,7 @@ extension Export {
             self.jsonl = jsonl
             self.result = result
             self.detected = detected
-            self.records = records
+            self.unredactedRecords = records
             self.messageCount = messageCount
         }
     }
@@ -299,8 +304,15 @@ extension Export {
     ///   `Transcript.compactText`/`jsonLines`. A downstream formatter that bypasses
     ///   those engine renderers must call `preparedRecords(_:scope:)` instead, or
     ///   it silently ignores those toggles (the alternate-format deviation this fixes).
-    public static func records(_ records: [MessageRecord], scope: Scope) -> [MessageRecord] {
+    public static func unredactedRecords(_ records: [MessageRecord], scope: Scope)
+        -> [MessageRecord]
+    {
         scope.dateRange.map { range in records.filter { range.contains($0.date) } } ?? records
+    }
+
+    @available(*, deprecated, renamed: "unredactedRecords(_:scope:)")
+    public static func records(_ records: [MessageRecord], scope: Scope) -> [MessageRecord] {
+        unredactedRecords(records, scope: scope)
     }
 
     /// The **fully-prepared** record set for a scope — the date-filtered slice with
@@ -327,11 +339,20 @@ extension Export {
     /// Redaction is NOT applied here. Redaction offsets point into the SOURCE text,
     /// so they do not fit a trimmed body: an output that needs redaction must use
     /// `preparedRedactedRecords`, never `redactedText` on these records.
+    @available(*, deprecated, renamed: "unredactedPreparedRecords(_:scope:)")
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
+        unredactedPreparedRecords(records, scope: scope)
+    }
+
+    /// `preparedRecords` under a name that says the text is not redacted.
+    public static func unredactedPreparedRecords(
+        _ records: [MessageRecord], scope: Scope
+    ) -> [MessageRecord] {
         var scope = scope
-        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: &scope)
+        let filtered = Self.identityScrubbed(
+            Self.unredactedRecords(records, scope: scope), scope: &scope)
         // The PN alias map is built from the date-filtered set — the same input
         // `compactText`/`jsonLines` see — so the speaker numbering is identical.
         let aliases =
@@ -442,7 +463,8 @@ extension Export {
         // The same date-filtered slice the renderer scans, so the scrubber fold and
         // the body render see exactly what is exported.
         var scope = scope
-        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: &scope)
+        let filtered = Self.identityScrubbed(
+            Self.unredactedRecords(records, scope: scope), scope: &scope)
         let effective = Self.effectiveRedactions(
             manual: redactions, records: filtered, scope: scope)
         // The speaker→PN map, built from the date-filtered set so the in-body alias
@@ -491,7 +513,7 @@ extension Export {
     ) -> Rendered {
         // (1) Filter to the scope's date window (nil = full history) — the single
         // filtering path, shared with the public `records(_:scope:)` accessor.
-        let filtered = Self.records(records, scope: scope)
+        let filtered = Self.unredactedRecords(records, scope: scope)
 
         // Empty scope → empty strings + nil result (the caller's existing
         // "nil RenderResult is the empty render" contract).
