@@ -40,6 +40,17 @@ struct OffsetMap: Sendable {
     ) {
         self.sourceLength = sourceLength
         self.redactedSourceRanges = replacements.map(\.range)
+        // An unchanged one-line body maps 1:1; skip the per-character scan.
+        if replacements.isEmpty, source.range(of: "\n").location == NSNotFound {
+            let end = Seg(
+                srcStart: sourceLength, srcEnd: sourceLength, outStart: sourceLength,
+                isRedacted: false)
+            segs =
+                sourceLength > 0
+                ? [Seg(srcStart: 0, srcEnd: sourceLength, outStart: 0, isRedacted: false), end]
+                : [end]
+            return
+        }
         var segs: [Seg] = []
         var srcCursor = 0
         var outCursor = 0

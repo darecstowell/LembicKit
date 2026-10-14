@@ -39,45 +39,42 @@ public struct Redaction: Hashable, Sendable {
 /// the spans are moot. `contains`, `all`, and `redactions(forGuid:)` reflect
 /// that absorption so callers never see redundant spans behind a tombstone.
 public struct RedactionSet: Sendable, Equatable {
-    private var items: Set<Redaction>
+    /// Indexed by guid, so a render looks up each message in constant time.
+    private var byGuid: [String: Set<Redaction>]
 
-    public init() { items = [] }
+    public init() { byGuid = [:] }
 
     /// Insert a redaction. Adding a whole-message redaction drops any existing
     /// span redactions for the same guid (they are now absorbed by the tombstone).
     public mutating func add(_ redaction: Redaction) {
         if redaction.range == nil {
-            // Whole-message redaction absorbs the guid's spans.
-            items = items.filter { $0.guid != redaction.guid }
-        } else if items.contains(Redaction(guid: redaction.guid, range: nil)) {
-            // A whole-message redaction already covers this guid — span is moot.
-            return
+            byGuid[redaction.guid] = [redaction]
+        } else if byGuid[redaction.guid]?.contains(Redaction(guid: redaction.guid, range: nil))
+            != true
+        {
+            byGuid[redaction.guid, default: []].insert(redaction)
         }
-        items.insert(redaction)
     }
 
     public mutating func remove(_ redaction: Redaction) {
-        items.remove(redaction)
+        byGuid[redaction.guid]?.remove(redaction)
+        if byGuid[redaction.guid]?.isEmpty == true { byGuid[redaction.guid] = nil }
     }
 
     public func contains(_ redaction: Redaction) -> Bool {
+        guard let set = byGuid[redaction.guid] else { return false }
         // A whole-message redaction implicitly contains any span for its guid.
-        if redaction.range != nil, items.contains(Redaction(guid: redaction.guid, range: nil)) {
-            return true
-        }
-        return items.contains(redaction)
+        return set.contains(redaction) || set.contains(Redaction(guid: redaction.guid, range: nil))
     }
 
-    public var isEmpty: Bool { items.isEmpty }
+    public var isEmpty: Bool { byGuid.isEmpty }
 
-    public var all: [Redaction] { Array(items) }
+    public var all: [Redaction] { byGuid.values.flatMap { $0 } }
 
     /// The redactions anchored to `guid`. If a whole-message redaction exists
     /// for the guid it is returned alone (it absorbs the spans).
     public func redactions(forGuid guid: String) -> [Redaction] {
-        let whole = Redaction(guid: guid, range: nil)
-        if items.contains(whole) { return [whole] }
-        return items.filter { $0.guid == guid }
+        byGuid[guid].map(Array.init) ?? []
     }
 }
 

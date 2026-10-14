@@ -724,8 +724,10 @@ public enum Transcript {
             let transformedBody = Self.applyReplacements(to: sourceNS, allReps)
 
             // Indentation transform on the body (newline → newline+8sp).
-            let indented = transformedBody.replacingOccurrences(
-                of: "\n", with: "\n        ")
+            let indented =
+                transformedBody.contains("\n")
+                ? transformedBody.replacingOccurrences(of: "\n", with: "\n        ")
+                : transformedBody
             let indentedNS = indented as NSString
 
             // Offset map covering BOTH transforms (the unified replacement collapse
