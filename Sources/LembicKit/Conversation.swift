@@ -238,17 +238,14 @@ public enum Conversations {
         // so the others' messages fall through to the contact name and split the
         // counterparty into a phantom extra speaker. Handing this to `group` lets
         // it claim ALL of a person's handles as "Them".
+        let normalize = HandleNormalizer(region: region)
         let handleLabels = try db.handleLabels()
-        let handlesByIdentifier = Dictionary(
-            grouping: handleLabels,
-            by: { ContactsMap.normalizeHandle($0.value, defaultRegion: region) }
-        ).mapValues { Set($0.map(\.key)) }
+        let handlesByIdentifier = Dictionary(grouping: handleLabels, by: { normalize($0.value) })
+            .mapValues { Set($0.map(\.key)) }
         (names, cards) = ContactsMap.withNationalFallback(
             names: names, contactIDs: cards,
             handles: Array(handlesByIdentifier.keys)
-                + summaries.compactMap(\.identifier).map {
-                    ContactsMap.normalizeHandle($0, defaultRegion: region)
-                })
+                + summaries.compactMap(\.identifier).map(normalize.callAsFunction))
         let groupSummaries = try db.groupConversationSummaries(schema: schema)
         owner.formUnion(
             ownerAddresses(
@@ -309,10 +306,10 @@ public enum Conversations {
     public static func ownerAddresses(
         seen perChat: [Set<String>], region: String = ContactsMap.defaultRegion
     ) -> Set<String> {
+        let normalize = HandleNormalizer(region: region)
         var chats: [String: Int] = [:]
         for addresses in perChat {
-            let normalized = Set(
-                addresses.map { ContactsMap.normalizeHandle($0, defaultRegion: region) })
+            let normalized = Set(addresses.map(normalize.callAsFunction))
             for address in normalized { chats[address, default: 0] += 1 }
         }
         return Set(chats.filter { $0.value >= 2 }.keys)
@@ -345,10 +342,11 @@ public enum Conversations {
             var name: String?
             var number = ""
         }
+        let normalize = HandleNormalizer(region: region)
         var groups: [String: Acc] = [:]
         for s in summaries {
             let ident = s.identifier ?? "h\(s.handleID)"
-            let norm = ContactsMap.normalizeHandle(ident, defaultRegion: region)
+            let norm = normalize(ident)
             let name = contacts[norm]
             let key = contactIDs[norm].map { "card:" + $0 } ?? norm
             var acc = groups[key] ?? Acc()
@@ -422,9 +420,9 @@ public enum Conversations {
         owner: Set<String> = [],
         region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
+        let normalize = HandleNormalizer(region: region)
         func identifier(_ handle: Int64) -> String {
-            handleLabels[handle].map { ContactsMap.normalizeHandle($0, defaultRegion: region) }
-                ?? "h\(handle)"
+            handleLabels[handle].map(normalize.callAsFunction) ?? "h\(handle)"
         }
         func person(_ handle: Int64) -> String { personKeys[handle] ?? identifier(handle) }
         func isOwner(_ handle: Int64) -> Bool {
@@ -583,11 +581,10 @@ public enum Conversations {
         contactIDs: [String: String] = [:],
         region: String = ContactsMap.defaultRegion
     ) -> [Int64: String] {
+        let normalize = HandleNormalizer(region: region)
         let handles = handleLabels.keys.sorted()
         let normalized = Dictionary(
-            uniqueKeysWithValues: handles.map {
-                ($0, ContactsMap.normalizeHandle(handleLabels[$0] ?? "", defaultRegion: region))
-            })
+            uniqueKeysWithValues: handles.map { ($0, normalize(handleLabels[$0] ?? "")) })
         var parent = Dictionary(uniqueKeysWithValues: handles.map { ($0, $0) })
         func find(_ h: Int64) -> Int64 {
             var root = h

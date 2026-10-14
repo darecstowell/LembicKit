@@ -120,10 +120,10 @@ public enum ContactsMap {
     }
 
     private static func handles(of contact: CNContact, region: String) -> Set<String> {
-        let phones = contact.phoneNumbers.compactMap {
-            normalizePhone($0.value.stringValue, defaultRegion: region)
-        }
-        return Set(phones + contact.emailAddresses.map { ($0.value as String).lowercased() })
+        let normalize = HandleNormalizer(region: region)
+        let phones = contact.phoneNumbers.compactMap { normalize.phone($0.value.stringValue) }
+        return Set(
+            phones + contact.emailAddresses.map { HandleNormalizer.email($0.value as String) })
     }
 
     /// Fold one contact's name + photo into the maps under each of its normalized
@@ -145,13 +145,12 @@ public enum ContactsMap {
             }
             if let photo, maps.avatars[key] == nil { maps.avatars[key] = photo }
         }
+        let normalize = HandleNormalizer(region: region)
         for phone in contact.phoneNumbers {
-            if let normalized = normalizePhone(phone.value.stringValue, defaultRegion: region) {
-                put(normalized)
-            }
+            if let normalized = normalize.phone(phone.value.stringValue) { put(normalized) }
         }
         for email in contact.emailAddresses {
-            put((email.value as String).lowercased())
+            put(HandleNormalizer.email(email.value as String))
         }
     }
 
@@ -214,10 +213,7 @@ public enum ContactsMap {
     public static func normalizeHandle(_ handle: String, defaultRegion: String = defaultRegion)
         -> String
     {
-        if handle.contains("@") { return handle.lowercased() }
-        // A business chat (`urn:biz:…`) or any other non-phone id is not a number.
-        if handle.contains(":") || handle.contains(where: \.isLetter) { return handle }
-        return normalizePhone(handle, defaultRegion: defaultRegion) ?? handle
+        HandleNormalizer(region: defaultRegion)(handle)
     }
 
     /// Best-effort E.164. A `+` prefix is authoritative. An international exit code
@@ -299,7 +295,7 @@ public enum ContactsMap {
         contacts: [String: String],
         region: String = currentRegion()
     ) -> (resolved: [Int64: String], matched: Int) {
-        let normalized = handleLabels.mapValues { normalizeHandle($0, defaultRegion: region) }
+        let normalized = handleLabels.mapValues(HandleNormalizer(region: region).callAsFunction)
         let names = withNationalFallback(
             names: contacts, contactIDs: [:], handles: normalized.values
         ).names
@@ -315,4 +311,23 @@ public enum ContactsMap {
         }
         return (out, matched)
     }
+}
+
+/// Normalizes chat.db and Contacts handles the same way, for one region.
+struct HandleNormalizer: Sendable {
+    let region: String
+
+    /// An email lowercased, a phone in best-effort E.164, any other id unchanged.
+    func callAsFunction(_ handle: String) -> String {
+        if handle.contains("@") { return Self.email(handle) }
+        // A business chat (`urn:biz:…`) or any other non-phone id is not a number.
+        if handle.contains(":") || handle.contains(where: \.isLetter) { return handle }
+        return phone(handle) ?? handle
+    }
+
+    func phone(_ raw: String) -> String? {
+        ContactsMap.normalizePhone(raw, defaultRegion: region)
+    }
+
+    static func email(_ raw: String) -> String { raw.lowercased() }
 }
