@@ -356,7 +356,7 @@ public final class ChatDatabase: @unchecked Sendable {
                            MAX(\(Self.sentDate(cols))) lastDate, COUNT(*) cnt,
                            \(Self.ownerAddresses(cols)) me
                     FROM chat c
-                    JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+                    CROSS JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
                     WHERE c.style = 43 AND \(Self.realMessageFilter(cols))
                     GROUP BY c.ROWID
@@ -448,7 +448,7 @@ public final class ChatDatabase: @unchecked Sendable {
                            CASE WHEN \(itemType) = 1 THEN \(other) ELSE m.handle_id END hid,
                            SUM(CASE WHEN \(itemType) = 1 THEN 0 ELSE 1 END) cnt
                     FROM chat c
-                    JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+                    CROSS JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
                     WHERE c.style = 43
                       AND ((m.is_from_me = 0 AND \(Self.realMessageFilter(cols)))
@@ -463,6 +463,10 @@ public final class ChatDatabase: @unchecked Sendable {
             return counts
         }
     }
+
+    // The group queries use CROSS JOIN so SQLite starts from `chat` (style = 43)
+    // and reaches messages through the chat_message_join key, the order that is
+    // fast with Apple's indexes or none; the planner otherwise may scan every join row.
 
     /// SQL that keeps real messages only: no system rows, no reactions.
     static func realMessageFilter(_ cols: SchemaColumns) -> String {
