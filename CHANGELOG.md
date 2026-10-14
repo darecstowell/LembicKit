@@ -34,6 +34,11 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- A received row with a NULL, 0, or unknown `handle_id` no longer reads "h0".
+  In a 1:1 every row not from the owner is "Them" (reactions too, so they net
+  with the counterparty's). In a group such a row is "Unknown sender", and an
+  event line about an unknown handle uses the subjectless phrasing
+  (lembickit.md F21).
 - A note to self shows each note once. A 1:1 whose identifiers all belong to the
   owner is `Conversation.isNoteToSelf`: every row is "Me", the incoming copy of
   each sent note (same text within a minute) is dropped and counted as

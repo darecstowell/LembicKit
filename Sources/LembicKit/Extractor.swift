@@ -161,11 +161,17 @@ public struct Extractor: Sendable {
         return Extractor(targetHandles: [], handleLabels: perSpeaker, rosterHandles: rosterHandles)
     }
 
+    /// "Me", "Them" for any other sender in a 1:1, else the member's label. A
+    /// group row whose handle is missing or unknown is "Unknown sender".
     public func label(isFromMe: Bool, handleID: Int64) -> String {
         if isFromMe || isNoteToSelf { return "Me" }
-        if targetHandles.contains(handleID) { return "Them" }
-        return handleLabels[handleID] ?? "h\(handleID)"
+        if isOneToOne { return "Them" }
+        guard handleID > 0, let label = handleLabels[handleID] else { return "Unknown sender" }
+        return label
     }
+
+    /// A 1:1 extractor carries the counterparty's handles; a group's is empty.
+    var isOneToOne: Bool { !targetHandles.isEmpty }
 
     /// The display label for a *system-event* actor / affected person. Mirrors the
     /// group body's labeling — a roster member resolves to its per-thread speaker
@@ -174,12 +180,12 @@ public struct Extractor: Sendable {
     /// remove targets) can reference a handle that has since **left the roster**, so
     /// its `handleLabels` entry is the raw phone/email — pretty-print that to a
     /// readable number so a removed member reads "Carla" or "(844) 399-6927", never
-    /// a bare `h17`. `handleID == 0` (an actor the row didn't record) → nil, so the
-    /// caller can fall back to a subjectless phrasing.
+    /// a bare `h17`. `handleID == 0` (an actor the row didn't record) or a handle
+    /// with no row → nil, so the caller can fall back to a subjectless phrasing.
     func systemEventLabel(isFromMe: Bool, handleID: Int64) -> String? {
         if isFromMe { return "Me" }
         guard handleID != 0 else { return nil }
-        guard let value = handleLabels[handleID] else { return "h\(handleID)" }
+        guard let value = handleLabels[handleID] else { return nil }
         // A roster member's value is its already-resolved per-thread label
         // (`groupSpeakerLabels`: "Mike", "Mike R.", or a formatted number). Use it
         // VERBATIM so the event line matches the message body exactly — re-first-
@@ -461,7 +467,7 @@ public struct Extractor: Sendable {
 
             let kind = Reactions.kind(of: amt)
             if kind != .message {
-                let reactor = isFromMe ? "me" : "h\(handleID)"
+                let reactor = isFromMe || isNoteToSelf ? "me" : isOneToOne ? "them" : "h\(handleID)"
                 let (target, part) = Reactions.target(from: row["amg"] as String? ?? "")
                 let key: String
                 let emoji: String
@@ -548,7 +554,7 @@ public struct Extractor: Sendable {
                 guid: guid,
                 date: date,
                 speaker: label(isFromMe: isFromMe, handleID: handleID),
-                isTarget: !isFromMe && targetHandles.contains(handleID),
+                isTarget: !isFromMe && isOneToOne && !isNoteToSelf,
                 service: row["service"],
                 text: text,
                 hadAttachment: hadAttachment,
