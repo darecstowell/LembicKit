@@ -34,6 +34,8 @@ These are the core nouns, drawn from the actual type names.
 
 **Attachment placeholder** (`Attachments.swift`). `AttachmentInfo.placeholder` maps a MIME type / UTI / transfer name to a typed token: `[photo]`, `[video]`, `[gif]`, `[audio]`, `[pdf]`, `[contact]`, `[attachment]`, plus the `[shared location]` fallback. Rich-link previews are dropped (the URL is already in the text).
 
+**App message** (`AppMessage.swift`). A message whose `balloon_bundle_id` names an app (Apple Pay, Polls, Check In, handwriting, Digital Touch, Find My, or a third-party app). Its body is a lone U+FFFC, so the extractor renders one token from `payload_data` instead, for example `[Apple Pay: Sent $20 with Apple Pay.]`, `[poll: Lunch? (Thai / Tacos)]`, or `[app: GamePigeon (Dots & Boxes)]`; an app it cannot read becomes `[app message]`. A poll vote (`associated_message_type` 4000) attaches to its poll like a reaction (`[Them: voted Tacos]`). Link previews (`URLBalloonProvider`) are not app messages.
+
 **ContactsMap** (`Contacts.swift`). Builds a normalized-handle to display-name map (and optional avatar thumbnails) by enumerating Contacts once. `normalizeHandle` lowercases emails and best-effort E.164-normalizes phone numbers so both sides match. Contacts access is optional: a denial degrades to bare identifiers.
 
 **AttributedBody** (`AttributedBody.swift`). Decodes the `attributedBody` typedstream blob (via the Madrid `TypedStream` dependency) to the plain backing string of its `NSAttributedString`. Used because many message bodies live only in this blob, not the `text` column.
@@ -66,6 +68,7 @@ These are the core nouns, drawn from the actual type names.
 | `SecretDetector.swift` | On-device detection of high-harm secrets (flag for review) | `SecretDetector.detect` |
 | `SecretScrubber.swift` | On-device opt-in auto-remove of ubiquitous PII | `SecretScrubber.scrub` |
 | `Contacts.swift` | Build the normalized-handle to name/avatar map; handle normalization | `ContactsMap`, `buildContactInfo`, `normalizeHandle`, `normalizePhone`, `resolve` |
+| `AppMessage.swift` | App-message tokens from `payload_data`, poll options and votes | `AppMessage` (internal) |
 | `Attachments.swift` | Typed attachment placeholder mapping | `AttachmentInfo`, `AttachmentInfo.placeholder` |
 | `AttributedBody.swift` | Decode the typedstream `attributedBody` blob to plain text | `AttributedBody.decode` |
 | `Reactions.swift` | Reaction value type, tapback mapping, add/remove netting | `Reaction`, `Reactions` (internal) |

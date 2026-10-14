@@ -31,6 +31,11 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- App messages no longer vanish. Apple Pay, polls, Check In, games and other
+  third-party apps, handwriting, and Digital Touch each render as one line read
+  from `payload_data`, for example `[Apple Pay: Sent $20 with Apple Pay.]`. An
+  app the engine cannot read shows `[app message]`. Poll votes attach to their
+  poll like a reaction (`[Them: voted Tacos]`) (lembickit.md F4).
 - Group stitching no longer merges different groups. Chats with different names
   never merge, even with the same members (for example "Book club" and "Lisbon
   trip"). When one roster has two names, its unnamed chats stay apart. The opt-in

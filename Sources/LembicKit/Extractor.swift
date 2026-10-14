@@ -179,7 +179,8 @@ public struct Extractor: Sendable {
         attributedBody: Data?,
         fallbackText: String?,
         balloonBundleID: String?,
-        attachments: [AttachmentInfo]
+        attachments: [AttachmentInfo],
+        payload: Data? = nil
     ) -> (text: String, hadAttachment: Bool) {
         let raw = attributedBody.flatMap(AttributedBody.decode) ?? (fallbackText ?? "")
         let placeholders = attachments.map(\.placeholder)
@@ -204,8 +205,10 @@ public struct Extractor: Sendable {
         }
 
         out = normalizeWhitespace(out)
-        if out.isEmpty, let bundle = balloonBundleID?.lowercased(), bundle.contains("findmy") {
-            out = "[shared location]"
+        if let bundle = balloonBundleID, !bundle.isEmpty,
+            let token = AppMessage.token(bundleID: bundle, payload: payload)
+        {
+            out = out.isEmpty ? token : out + " " + token
         }
         return (out, hadAttachment)
     }
@@ -272,6 +275,7 @@ public struct Extractor: Sendable {
         var rawReactions: [RawReaction] = []
         var seenROWIDs = Set<Int64>()
         var sequence = 0
+        var pollOptions: [String: [String: String]] = [:]
 
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
         let rows = try Row.fetchCursor(
@@ -283,7 +287,7 @@ public struct Extractor: Sendable {
                        \(m("associated_message_type")) amt, \(m("associated_message_guid")) amg,
                        \(m("associated_message_emoji")) ame,
                        \(m("balloon_bundle_id")) balloon_bundle_id,
-                       \(m("date_retracted")) date_retracted
+                       \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY m.date, m.ROWID
@@ -320,19 +324,42 @@ public struct Extractor: Sendable {
                 sequence += 1
                 continue
             }
+            if amt == 4000 {
+                let target = Reactions.targetGUID(from: row["amg"] as String? ?? "")
+                let options = pollOptions[target] ?? [:]
+                let chosen = (row["payload_data"] as Data?).map(AppMessage.votes(from:)) ?? []
+                let texts = chosen.compactMap { options[$0] }
+                rawReactions.append(
+                    RawReaction(
+                        dateNS: dateNS,
+                        sequence: sequence,
+                        targetGUID: target,
+                        reactorKey: "vote:" + (isFromMe ? "me" : "h\(handleID)"),
+                        reactorLabel: label(isFromMe: isFromMe, handleID: handleID),
+                        emoji: texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", "),
+                        isRemove: false))
+                sequence += 1
+                continue
+            }
             sequence += 1
 
             if (row["item_type"] as Int64? ?? 0) != 0 { continue }  // system events
             if (row["date_retracted"] as Int64? ?? 0) != 0 { continue }  // unsent
 
+            let payload: Data? = row["payload_data"]
             let (text, hadAttachment) = Self.renderText(
                 attributedBody: row["attributedBody"],
                 fallbackText: row["text"],
                 balloonBundleID: row["balloon_bundle_id"],
-                attachments: attachmentMap[rowid] ?? [])
+                attachments: attachmentMap[rowid] ?? [],
+                payload: payload)
             if text.isEmpty { continue }
 
             let guid: String? = row["guid"]
+            if let guid, let payload, let poll = AppMessage.poll(from: payload) {
+                pollOptions[guid] = Dictionary(
+                    poll.options.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
+            }
             // Floor to whole seconds: chat.db dates carry sub-second precision,
             // and DateFormatter rounds fractional seconds up while strftime
             // (the Python reference) truncates them.
