@@ -125,7 +125,7 @@ public enum Transcript {
             ("[genmoji: …]", ["[genmoji: "]), ("[attachment]", ["[attachment]"]),
         ]
         var found = Set<String>()
-        for body in bodies where body.contains("[") {
+        for body in bodies where body.utf8.contains(0x5B) {
             for kind in kinds where !found.contains(kind.token) {
                 if kind.matches.contains(where: body.contains) { found.insert(kind.token) }
             }

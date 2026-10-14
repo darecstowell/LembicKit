@@ -45,7 +45,7 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 - Faster extraction and transcript text, with the same output. On a synthetic
   200k-message thread, `extractConversation` drops from 4.5 s to 1.7 s,
-  `compactText` from 1.8 s to 1.5 s, and `jsonLines` from 0.97 s to 0.76 s. The
+  `compactText` from 1.8 s to 1.15 s, and `jsonLines` from 0.97 s to 0.78 s. The
   group list queries start from `chat` (performance.md #7, #15).
 - The transcript names its time zone, and a DST fall-back hour no longer reads
   out of order. The header says `# Times are local (America/Chicago), 24h.`
