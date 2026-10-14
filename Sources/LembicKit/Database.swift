@@ -147,11 +147,13 @@ public final class ChatDatabase: @unchecked Sendable {
     public func oneToOneChats(forHandles handles: Set<Int64>) throws -> [ChatInfo] {
         guard !handles.isEmpty else { return [] }
         return try read { db in
+            let cols = try SchemaColumns.load(db)
             let placeholders = Array(repeating: "?", count: handles.count).joined(separator: ",")
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT c.ROWID cid, c.chat_identifier ident, c.service_name svc, chj.handle_id hid
+                    SELECT c.ROWID cid, \(cols.column("c", "chat", "chat_identifier")) ident,
+                           \(cols.column("c", "chat", "service_name")) svc, chj.handle_id hid
                     FROM chat c JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
                     WHERE c.style = 45 AND chj.handle_id IN (\(placeholders))
                     ORDER BY c.ROWID
@@ -212,18 +214,23 @@ public final class ChatDatabase: @unchecked Sendable {
     /// runtime Contacts map).
     public func conversationSummaries() throws -> [ConversationSummary] {
         try read { db in
+            let cols = try SchemaColumns.load(db)
+            let handleJoin =
+                cols.has("handle", "id") ? "LEFT JOIN handle h ON h.ROWID = chj.handle_id" : ""
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT c.ROWID cid, c.chat_identifier ident, c.service_name svc,
+                    SELECT c.ROWID cid,
+                           COALESCE(\(cols.column("c", "chat", "chat_identifier")),
+                                    \(cols.column("h", "handle", "id"))) ident,
+                           \(cols.column("c", "chat", "service_name")) svc,
                            chj.handle_id hid, MAX(m.date) lastDate, COUNT(*) cnt
                     FROM chat c
                     JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+                    \(handleJoin)
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
-                    WHERE c.style = 45
-                      AND COALESCE(m.item_type, 0) = 0
-                      AND COALESCE(m.associated_message_type, 0) = 0
+                    WHERE c.style = 45 AND \(Self.realMessageFilter(cols))
                     GROUP BY c.ROWID
                     ORDER BY lastDate DESC
                     """)
@@ -300,17 +307,18 @@ public final class ChatDatabase: @unchecked Sendable {
                 if let hid { rosters[cid, default: []].append(hid) }
             }
 
+            let cols = try SchemaColumns.load(db)
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT c.ROWID cid, c.chat_identifier ident, c.service_name svc,
-                           c.display_name dname, MAX(m.date) lastDate, COUNT(*) cnt
+                    SELECT c.ROWID cid, \(cols.column("c", "chat", "chat_identifier")) ident,
+                           \(cols.column("c", "chat", "service_name")) svc,
+                           \(cols.column("c", "chat", "display_name")) dname,
+                           MAX(m.date) lastDate, COUNT(*) cnt
                     FROM chat c
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
-                    WHERE c.style = 43
-                      AND COALESCE(m.item_type, 0) = 0
-                      AND COALESCE(m.associated_message_type, 0) = 0
+                    WHERE c.style = 43 AND \(Self.realMessageFilter(cols))
                     GROUP BY c.ROWID
                     ORDER BY lastDate DESC
                     """)
@@ -347,6 +355,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// the end of the order via the stable alphabetical tiebreak.
     public func groupParticipantMessageCounts() throws -> [Int64: [Int64: Int]] {
         try read { db in
+            let cols = try SchemaColumns.load(db)
             var counts: [Int64: [Int64: Int]] = [:]
             let rows = try Row.fetchAll(
                 db,
@@ -357,8 +366,7 @@ public final class ChatDatabase: @unchecked Sendable {
                     JOIN message m ON m.ROWID = cmj.message_id
                     WHERE c.style = 43
                       AND m.is_from_me = 0
-                      AND COALESCE(m.item_type, 0) = 0
-                      AND COALESCE(m.associated_message_type, 0) = 0
+                      AND \(Self.realMessageFilter(cols))
                     GROUP BY cmj.chat_id, m.handle_id
                     """)
             for row in rows {
@@ -370,63 +378,94 @@ public final class ChatDatabase: @unchecked Sendable {
         }
     }
 
+    /// SQL that keeps real messages only: no system rows, no reactions.
+    static func realMessageFilter(_ cols: SchemaColumns) -> String {
+        "COALESCE(\(cols.column("m", "message", "item_type")), 0) = 0"
+            + " AND COALESCE(\(cols.column("m", "message", "associated_message_type")), 0) = 0"
+    }
+
     // MARK: - Schema-sanity guard
 
-    /// The chat.db surface LembicKit's SQL reads, table → required columns.
-    /// **Keep in lockstep** with the queries in `Extractor` and `oneToOneChats`:
-    /// this is the contract the guard enforces, so a column added there must be
-    /// added here. `ROWID` is intentionally absent — SQLite exposes it on every
-    /// (non WITHOUT-ROWID) table whether or not it's declared, so `PRAGMA
-    /// table_info` won't list it for the join tables (e.g. message_attachment_join)
-    /// and checking it would false-fail on a perfectly good database.
+    /// The columns the engine cannot work without. A missing one fails closed.
+    /// Every other column the SQL reads is in `optionalSchema` and is probed at
+    /// query time. `ROWID` is absent on purpose: SQLite has it on every table, but
+    /// `PRAGMA table_info` does not list it for the join tables.
     public static let requiredSchema: [(table: String, columns: [String])] = [
         ("handle", ["id"]),
-        ("chat", ["chat_identifier", "service_name", "style", "display_name"]),
+        ("chat", ["style"]),
         ("chat_handle_join", ["chat_id", "handle_id"]),
         ("chat_message_join", ["chat_id", "message_id"]),
+        ("message", ["guid", "date", "is_from_me", "handle_id"]),
+    ]
+
+    /// The message body: at least one of these columns must exist.
+    public static let requiredBodyColumns = ["text", "attributedBody"]
+
+    /// Columns read when present. A missing one degrades one feature (a NULL is
+    /// selected in its place), never the whole export. Keep in lockstep with the SQL.
+    public static let optionalSchema: [(table: String, columns: [String])] = [
+        ("chat", ["chat_identifier", "service_name", "display_name"]),
         (
             "message",
             [
-                "guid", "date", "is_from_me", "handle_id", "service", "text",
-                "attributedBody", "item_type", "associated_message_type",
+                "service", "text", "attributedBody", "item_type", "associated_message_type",
                 "associated_message_guid", "associated_message_emoji", "balloon_bundle_id",
-                "date_retracted",
+                "date_retracted", "group_action_type", "group_title", "other_handle",
             ]
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),
         ("attachment", ["mime_type", "uti", "transfer_name"]),
     ]
 
-    /// Structural check only: every required table/column the database is
-    /// *missing*. Empty ⇒ the schema is the one the engine reads. Unknown
-    /// `chat.style` values and an empty store are *valid* (a fresh install has
-    /// no 1:1 chats yet), so neither is reported here — those are separate app
-    /// states.
+    /// Every missing core table or column. Empty means the engine can read the
+    /// database. Unknown `chat.style` values and an empty store are valid, so
+    /// neither is reported here.
     public func schemaProblems() throws -> [SchemaProblem] {
         try read { db in
             var problems: [SchemaProblem] = []
-            for (table, columns) in Self.requiredSchema {
-                // `table` is a compile-time constant from `requiredSchema`, never
-                // user input, so interpolating it into PRAGMA (which can't bind an
-                // identifier) is safe. A missing table yields an empty result set.
-                let present = Set(
-                    try Row.fetchAll(db, sql: "PRAGMA table_info(\(table))")
-                        .map { ($0["name"] as String).lowercased() })
-                if present.isEmpty {
+            let columns = try SchemaColumns.load(db, tables: Self.requiredSchema.map(\.table))
+            for (table, required) in Self.requiredSchema {
+                guard columns.hasTable(table) else {
                     problems.append(SchemaProblem(table: table, column: nil))
                     continue
                 }
-                for column in columns where !present.contains(column.lowercased()) {
+                for column in required where !columns.has(table, column) {
                     problems.append(SchemaProblem(table: table, column: column))
+                }
+            }
+            if columns.hasTable("message"),
+                !Self.requiredBodyColumns.contains(where: { columns.has("message", $0) })
+            {
+                problems += Self.requiredBodyColumns.map {
+                    SchemaProblem(table: "message", column: $0)
                 }
             }
             return problems
         }
     }
 
-    /// Fail-closed gate for the export path (app/CLI): no-op when the schema is
-    /// supported, throws `UnsupportedSchemaError` otherwise. The caller turns the
-    /// throw into a loud, copyable error rather than a silently-wrong export.
+    /// Every optional table or column the database lacks: the features that will
+    /// degrade. For diagnostics only; `preflight()` never fails on these.
+    public func missingOptionalColumns() throws -> [SchemaProblem] {
+        try read { db in
+            let columns = try SchemaColumns.load(db, tables: Self.optionalSchema.map(\.table))
+            var gaps: [SchemaProblem] = []
+            for (table, optional) in Self.optionalSchema {
+                guard columns.hasTable(table) else {
+                    gaps.append(SchemaProblem(table: table, column: nil))
+                    continue
+                }
+                gaps += optional.filter { !columns.has(table, $0) }.map {
+                    SchemaProblem(table: table, column: $0)
+                }
+            }
+            return gaps
+        }
+    }
+
+    /// Fail-closed gate for the export path: throws `UnsupportedSchemaError` when a
+    /// core column is missing, so the caller shows a clear error instead of a
+    /// wrong export. Missing optional columns pass.
     public func preflight() throws {
         let problems = try schemaProblems()
         if !problems.isEmpty { throw UnsupportedSchemaError(problems: problems) }
@@ -450,13 +489,47 @@ public final class ChatDatabase: @unchecked Sendable {
     static func hasColumns(_ columns: [String], inTable table: String, db: GRDB.Database) throws
         -> Bool
     {
-        // `table` is a caller-supplied constant (never user input), so
-        // interpolating it into PRAGMA — which can't bind an identifier — is safe;
-        // the only call sites pass literal chat.db table names.
-        let present = Set(
-            try Row.fetchAll(db, sql: "PRAGMA table_info(\(table))")
-                .map { ($0["name"] as String).lowercased() })
-        return columns.allSatisfy { present.contains($0.lowercased()) }
+        let schema = try SchemaColumns.load(db, tables: [table])
+        return columns.allSatisfy { schema.has(table, $0) }
+    }
+}
+
+/// The columns a database actually has, read once per query with `PRAGMA
+/// table_info`. Lets each query select `NULL` in place of an absent optional column.
+struct SchemaColumns: Sendable {
+    private var tables: [String: Set<String>] = [:]
+
+    /// `tables` are chat.db table-name constants from the engine, never user input,
+    /// so interpolating them into PRAGMA (which cannot bind an identifier) is safe.
+    static func load(_ db: GRDB.Database, tables names: [String]) throws -> SchemaColumns {
+        var schema = SchemaColumns()
+        for name in Set(names) {
+            let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(\(name))")
+                .map { ($0["name"] as String).lowercased() }
+            if !columns.isEmpty { schema.tables[name.lowercased()] = Set(columns) }
+        }
+        return schema
+    }
+
+    /// Every table the engine's SQL can touch.
+    static let engineTables = [
+        "handle", "chat", "chat_handle_join", "chat_message_join", "message",
+        "message_attachment_join", "attachment",
+    ]
+
+    static func load(_ db: GRDB.Database) throws -> SchemaColumns {
+        try load(db, tables: engineTables)
+    }
+
+    func hasTable(_ table: String) -> Bool { tables[table.lowercased()] != nil }
+
+    func has(_ table: String, _ column: String) -> Bool {
+        tables[table.lowercased()]?.contains(column.lowercased()) ?? false
+    }
+
+    /// `alias.column` when the column exists, else `NULL`.
+    func column(_ alias: String, _ table: String, _ column: String) -> String {
+        has(table, column) ? "\(alias).\(column)" : "NULL"
     }
 }
 

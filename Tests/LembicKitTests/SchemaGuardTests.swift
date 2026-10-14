@@ -19,25 +19,38 @@ struct SchemaGuardTests {
     }
 
     @Test func missingColumnNamedExactly() throws {
-        let sql = Fixtures.fullSchema.replacingOccurrences(
-            of: "attributedBody BLOB, ", with: "")
+        let sql = Fixtures.fullSchema.replacingOccurrences(of: "is_from_me INTEGER,", with: "")
         let db = try Fixtures.openChatDB(populating: sql)
         let problems = try db.schemaProblems()
         #expect(
-            problems == [SchemaProblem(table: "message", column: "attributedBody")],
-            "missing column reported by exact (table, column)")
+            problems == [SchemaProblem(table: "message", column: "is_from_me")],
+            "missing core column reported by exact (table, column)")
     }
 
     @Test func missingTableReportedWithNilColumn() throws {
+        let noJoin =
+            Fixtures.fullSchema
+            .components(separatedBy: "\n")
+            .filter { !$0.contains("CREATE TABLE chat_message_join ") }
+            .joined(separator: "\n")
+        let db = try Fixtures.openChatDB(populating: noJoin)
+        let problems = try db.schemaProblems()
+        #expect(
+            problems.contains(SchemaProblem(table: "chat_message_join", column: nil)),
+            "missing core table reported with column = nil")
+    }
+
+    @Test func missingOptionalTableIsNotAProblem() throws {
         let noAttachment =
             Fixtures.fullSchema
             .components(separatedBy: "\n")
             .filter { !$0.contains("CREATE TABLE attachment ") }
             .joined(separator: "\n")
         let db = try Fixtures.openChatDB(populating: noAttachment)
-        let problems = try db.schemaProblems()
+        #expect(try db.schemaProblems().isEmpty, "attachments are optional")
+        let gaps = try db.missingOptionalColumns()
         #expect(
-            problems.contains(SchemaProblem(table: "attachment", column: nil)),
-            "missing table reported with column = nil")
+            gaps.contains(SchemaProblem(table: "attachment", column: nil)),
+            "the missing optional table is listed for diagnostics")
     }
 }

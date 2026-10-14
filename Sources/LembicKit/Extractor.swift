@@ -137,16 +137,24 @@ public struct Extractor: Sendable {
     /// A message reachable from more than one unioned chat would otherwise list
     /// its attachments once per chat, so links are de-duped by maj.ROWID — a
     /// no-op for a single chat, so the byte-validated path stays identical.
-    func loadAttachments(_ db: GRDB.Database, chatIDs: [Int64]) throws -> [Int64: [AttachmentInfo]]
-    {
-        guard !chatIDs.isEmpty else { return [:] }
+    func loadAttachments(
+        _ db: GRDB.Database, chatIDs: [Int64], schema cols: SchemaColumns
+    ) throws -> [Int64: [AttachmentInfo]] {
+        guard !chatIDs.isEmpty,
+            cols.has("message_attachment_join", "message_id"),
+            cols.has("message_attachment_join", "attachment_id"),
+            cols.hasTable("attachment")
+        else { return [:] }
         var map: [Int64: [AttachmentInfo]] = [:]
         var seenLinks = Set<Int64>()
         let placeholders = Array(repeating: "?", count: chatIDs.count).joined(separator: ",")
         let rows = try Row.fetchCursor(
             db,
             sql: """
-                SELECT maj.ROWID majid, maj.message_id mid, at.mime_type, at.uti, at.transfer_name
+                SELECT maj.ROWID majid, maj.message_id mid,
+                       \(cols.column("at", "attachment", "mime_type")) mime_type,
+                       \(cols.column("at", "attachment", "uti")) uti,
+                       \(cols.column("at", "attachment", "transfer_name")) transfer_name
                 FROM chat_message_join cmj
                 JOIN message_attachment_join maj ON maj.message_id = cmj.message_id
                 JOIN attachment at ON at.ROWID = maj.attachment_id
@@ -253,7 +261,9 @@ public struct Extractor: Sendable {
     {
         let ids = chatIDs.sorted()
         guard !ids.isEmpty else { return [] }
-        let attachmentMap = try loadAttachments(db, chatIDs: ids)
+        let cols = try SchemaColumns.load(db)
+        let attachmentMap = try loadAttachments(db, chatIDs: ids, schema: cols)
+        func m(_ column: String) -> String { cols.column("m", "message", column) }
 
         var emitted: [MessageRecord] = []
         var indexByGUID: [String: Int] = [:]
@@ -265,10 +275,13 @@ public struct Extractor: Sendable {
         let rows = try Row.fetchCursor(
             db,
             sql: """
-                SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id, m.service,
-                       m.text, m.attributedBody, m.item_type,
-                       m.associated_message_type amt, m.associated_message_guid amg,
-                       m.associated_message_emoji ame, m.balloon_bundle_id, m.date_retracted
+                SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id,
+                       \(m("service")) service, \(m("text")) text,
+                       \(m("attributedBody")) attributedBody, \(m("item_type")) item_type,
+                       \(m("associated_message_type")) amt, \(m("associated_message_guid")) amg,
+                       \(m("associated_message_emoji")) ame,
+                       \(m("balloon_bundle_id")) balloon_bundle_id,
+                       \(m("date_retracted")) date_retracted
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY m.date, m.ROWID
@@ -365,15 +378,9 @@ public struct Extractor: Sendable {
     ///   Actor = `handle_id` / `is_from_me`.
     /// - **3** — a participant left. Actor (the leaver) = `handle_id` / `is_from_me`.
     ///
-    /// Each column **value** is read defensively (`row[...] as T?`), so a NULL
-    /// degrades to a less-specific phrasing rather than throwing. A *missing
-    /// column*, though, throws at statement-prepare time — and these three
-    /// (`group_action_type`/`group_title`/`other_handle`) are deliberately NOT in
-    /// `requiredSchema` (the default export never reads them). So we **probe** the
-    /// `message` table for all three up front (reusing the same `PRAGMA table_info`
-    /// introspection the schema guard uses); if a future/older macOS dropped any,
-    /// the opt-in stream simply yields `[]` (the toggle shows nothing) rather than
-    /// failing-closed a database the default export reads fine.
+    /// Each column value is read defensively, so a NULL degrades to a less
+    /// specific phrasing. The event columns are in `optionalSchema`, so they are
+    /// probed first: if one is missing, the stream is `[]` instead of an error.
     public func extractSystemEvents(_ db: GRDB.Database, chatIDs: Set<Int64>) throws
         -> [Transcript.SystemEvent]
     {
@@ -384,11 +391,10 @@ public struct Extractor: Sendable {
         // would throw at prepare time, so degrade to an empty stream instead.
         guard
             try ChatDatabase.hasColumns(
-                ["group_action_type", "group_title", "other_handle"], inTable: "message", db: db)
+                ["item_type", "group_action_type", "group_title", "other_handle"],
+                inTable: "message", db: db)
         else {
-            Self.log.notice(
-                "system events: message table missing group_action_type/group_title/other_handle — yielding none"
-            )
+            Self.log.notice("system events: message table lacks the event columns, yielding none")
             return []
         }
 

@@ -8,6 +8,16 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS 14 databases export again. The schema guard now fails closed only on the
+  core columns the engine cannot work without (`ChatDatabase.requiredSchema` and
+  `requiredBodyColumns`). Every other column is in the new
+  `ChatDatabase.optionalSchema` and is probed at query time, so a missing one
+  degrades one feature: for example, an emoji tapback without
+  `associated_message_emoji` shows "•". `missingOptionalColumns()` lists the gaps
+  (lembickit.md F3).
+
 ## [0.3.1] - 2026-06-19
 
 ### Security

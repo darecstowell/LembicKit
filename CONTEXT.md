@@ -26,7 +26,7 @@ These are the core nouns, drawn from the actual type names.
 
 **ConversationSummary / GroupConversationSummary** (`Database.swift`). The raw per-chat rows that `Conversations` folds into `Conversation`s. Counts and dates use real messages only (`item_type = 0`, no reactions, no system events).
 
-**Schema guard / required-schema contract** (`Database.swift`). `ChatDatabase.requiredSchema` declares the exact tables and columns the SQL reads. `schemaProblems()` introspects via `PRAGMA table_info` and lists anything missing; `preflight()` throws `UnsupportedSchemaError` when the list is non-empty. The guard fails closed so an unsupported `chat.db` produces a visible error rather than a silently-wrong export.
+**Schema guard / required-schema contract** (`Database.swift`). `ChatDatabase.requiredSchema` (plus `requiredBodyColumns`: `text` or `attributedBody`) declares the core columns the engine cannot work without. `ChatDatabase.optionalSchema` declares every other column the SQL reads. `schemaProblems()` introspects via `PRAGMA table_info` and lists missing core columns; `preflight()` throws `UnsupportedSchemaError` when that list is non-empty. A missing optional column never fails: each query probes with `SchemaColumns` and selects `NULL` in its place, so one feature degrades (for example, emoji tapbacks fall back to "•" on macOS 14). `missingOptionalColumns()` lists those gaps for diagnostics.
 
 **Reaction** (`Reactions.swift`). A tapback, after netting adds against removes per (target message, reactor). `Reactions.net` keeps the latest add unless a later remove cleared it.
 
@@ -89,11 +89,9 @@ The regold writer targets the source `Fixtures/` directory via `#filePath`, not 
 
 ### The schema-sanity guard
 
-`ChatDatabase.requiredSchema` is the contract: the exact tables and columns the engine's SQL reads, declared as `(table, columns)` pairs. It must stay in lockstep with the queries in `Extractor` and `Database`. A column added to a query must be added here. `ROWID` is intentionally absent: SQLite exposes it on every non-`WITHOUT ROWID` table regardless of declaration, so checking it would false-fail.
+Two lists are the contract, declared as `(table, columns)` pairs. `ChatDatabase.requiredSchema` (and `requiredBodyColumns`) holds only the core columns the engine cannot work without; a missing one fails closed. `ChatDatabase.optionalSchema` holds every other column the SQL reads. Both must stay in lockstep with the queries in `Extractor` and `Database`: a column added to a query goes in one of the two lists, and an optional column must be selected through `SchemaColumns.column(_:_:_:)`, which yields `NULL` when the column is absent. `ROWID` is intentionally absent: SQLite exposes it on every non-`WITHOUT ROWID` table regardless of declaration, so checking it would false-fail.
 
-`schemaProblems()` returns every missing table or column. `preflight()` throws `UnsupportedSchemaError` when any are missing, failing closed. Unknown `chat.style` values and an empty store are valid (a fresh install has no chats yet) and are not reported here.
-
-Three columns the opt-in group system-event stream reads (`group_action_type`, `group_title`, `other_handle`) are deliberately not in `requiredSchema` (the default export never touches them). `hasColumns(_:inTable:)` probes for them at runtime so a missing column degrades the toggle to an empty stream rather than throwing at statement-prepare time.
+`schemaProblems()` returns every missing core table or column. `preflight()` throws `UnsupportedSchemaError` when any are missing. Unknown `chat.style` values and an empty store are valid (a fresh install has no chats yet) and are not reported here. `missingOptionalColumns()` lists the optional gaps; they never block an export.
 
 ### Copy-then-read
 
