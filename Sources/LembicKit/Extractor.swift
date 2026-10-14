@@ -304,40 +304,41 @@ public struct Extractor: Sendable {
             let handleID: Int64 = row["handle_id"] ?? 0
             let amt: Int64 = row["amt"] ?? 0
 
-            if (2000...2006).contains(amt) || (3000...3006).contains(amt) {
-                let isRemove = amt >= 3000
-                let base = isRemove ? amt - 1000 : amt
-                let emoji =
-                    base == 2006
-                    ? (row["ame"] as String? ?? "•")
-                    : (Reactions.tapback[base] ?? "•")
+            let kind = Reactions.kind(of: amt)
+            if kind != .message {
+                let reactor = isFromMe ? "me" : "h\(handleID)"
                 let target = Reactions.targetGUID(from: row["amg"] as String? ?? "")
+                let key: String
+                let emoji: String
+                var isRemove = false
+                switch kind {
+                case .tapback(let base, let remove):
+                    key = (base == 2007 ? "sticker-tapback:" : "tapback:") + reactor
+                    emoji = Reactions.emoji(base: base, custom: row["ame"])
+                    isRemove = remove
+                case .sticker:
+                    key = "sticker:\(rowid)"
+                    emoji = "sticker"
+                case .vote:
+                    let options = pollOptions[target] ?? [:]
+                    let chosen = (row["payload_data"] as Data?).map(AppMessage.votes(from:)) ?? []
+                    let texts = chosen.compactMap { options[$0] }
+                    key = "vote:" + reactor
+                    emoji = texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", ")
+                case .message, .unknown:
+                    Self.log.notice("skipped a row with associated_message_type \(amt)")
+                    sequence += 1
+                    continue
+                }
                 rawReactions.append(
                     RawReaction(
                         dateNS: dateNS,
                         sequence: sequence,
                         targetGUID: target,
-                        reactorKey: isFromMe ? "me" : "h\(handleID)",
+                        reactorKey: key,
                         reactorLabel: label(isFromMe: isFromMe, handleID: handleID),
                         emoji: emoji,
                         isRemove: isRemove))
-                sequence += 1
-                continue
-            }
-            if amt == 4000 {
-                let target = Reactions.targetGUID(from: row["amg"] as String? ?? "")
-                let options = pollOptions[target] ?? [:]
-                let chosen = (row["payload_data"] as Data?).map(AppMessage.votes(from:)) ?? []
-                let texts = chosen.compactMap { options[$0] }
-                rawReactions.append(
-                    RawReaction(
-                        dateNS: dateNS,
-                        sequence: sequence,
-                        targetGUID: target,
-                        reactorKey: "vote:" + (isFromMe ? "me" : "h\(handleID)"),
-                        reactorLabel: label(isFromMe: isFromMe, handleID: handleID),
-                        emoji: texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", "),
-                        isRemove: false))
                 sequence += 1
                 continue
             }

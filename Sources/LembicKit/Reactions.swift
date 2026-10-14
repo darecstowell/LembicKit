@@ -10,7 +10,7 @@ public struct Reaction: Hashable, Sendable {
     }
 }
 
-/// One reaction/tapback row before netting (associated_message_type 2000–3006).
+/// One reaction, sticker, or vote row before netting.
 struct RawReaction {
     let dateNS: Int64
     let sequence: Int  // original row order; keeps the date sort stable
@@ -27,6 +27,40 @@ enum Reactions {
     static let tapback: [Int64: String] = [
         2000: "❤️", 2001: "👍", 2002: "👎", 2003: "😂", 2004: "‼️", 2005: "❓",
     ]
+
+    /// What a row's `associated_message_type` makes it.
+    enum Kind: Equatable {
+        /// A normal message (0, and the app-message types 2 and 3).
+        case message
+        /// A tapback (2000 to 2999) or its removal (3000 to 3999); `base` is the add type.
+        case tapback(base: Int64, isRemove: Bool)
+        /// A sticker placed on a bubble (1000).
+        case sticker
+        /// A poll vote (4000).
+        case vote
+        /// A type this engine does not know. Never shown as a message.
+        case unknown
+    }
+
+    static func kind(of type: Int64) -> Kind {
+        switch type {
+        case 0, 2, 3: .message
+        case 1000: .sticker
+        case 2000...2999: .tapback(base: type, isRemove: false)
+        case 3000...3999: .tapback(base: type - 1000, isRemove: true)
+        case 4000: .vote
+        default: .unknown
+        }
+    }
+
+    /// The emoji for a tapback: the classic set, a sticker (2007), the row's own
+    /// emoji (2006 and newer types), else "•".
+    static func emoji(base: Int64, custom: String?) -> String {
+        if let classic = tapback[base] { return classic }
+        if base == 2007 { return "sticker" }
+        if let custom, !custom.isEmpty { return custom }
+        return "•"
+    }
 
     /// Strip the part-index prefix from associated_message_guid
     /// ("p:0/GUID" or "bp:GUID") so it matches message.guid.

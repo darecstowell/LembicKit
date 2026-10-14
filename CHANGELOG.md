@@ -31,6 +31,12 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Sticker reactions and unknown reaction types no longer show as separate
+  messages. A sticker tapback (2007, removed by 3007) and a sticker placed on a
+  bubble (1000) attach to their target as `[Them: sticker]`. Any future tapback
+  type (2000 to 2999) attaches with its own emoji or "•", and any other unknown
+  `associated_message_type` is dropped, never shown with its quoted text
+  (lembickit.md F6, redaction.md F32).
 - Non-US contacts resolve to names. `buildContactInfo`, `resolve`, and
   `Conversations.list` take a `region:` that defaults to the new
   `ContactsMap.currentRegion()` (the Contacts setting, else the system region).
