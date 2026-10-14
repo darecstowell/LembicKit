@@ -312,6 +312,7 @@ public enum Conversations {
             var chatKeys = Set<String>()
             var handles = Set<Int64>()
             var identifiers = Set<String>()
+            var legacy = Set<String>()
             var last = Date.distantPast
             var count = 0
             var name: String?
@@ -328,6 +329,7 @@ public enum Conversations {
             acc.chatKeys.insert(chatKey(guid: s.guid, chatID: s.chatID))
             acc.handles.insert(s.handleID)
             acc.identifiers.insert(norm)
+            acc.legacy.insert(legacyHandleKey(ident))
             acc.count += s.messageCount
             acc.name = acc.name ?? name
             if s.lastMessageDate >= acc.last {
@@ -356,7 +358,7 @@ public enum Conversations {
                     messageCount: a.count,
                     primaryIdentifier: a.number,
                     isContact: a.name != nil,
-                    legacyIDs: a.identifiers.union(a.name.map { [$0] } ?? []),
+                    legacyIDs: a.identifiers.union(a.legacy).union(a.name.map { [$0] } ?? []),
                     chatGUIDs: a.chatKeys)
             }
             .sorted { $0.lastMessageDate > $1.lastMessageDate }
@@ -603,6 +605,17 @@ public enum Conversations {
     /// `chat:` plus the smallest chat key, so it never depends on ROWID order.
     static func stableID(_ chatKeys: Set<String>) -> String {
         "chat:" + (chatKeys.min() ?? "")
+    }
+
+    /// The 0.3.1 key for a 1:1 identifier: its normalizer with the US default.
+    static func legacyHandleKey(_ handle: String) -> String {
+        if handle.contains("@") { return handle.lowercased() }
+        let digits = handle.filter(\.isNumber)
+        guard digits.count >= 7 else { return handle }
+        if handle.contains("+") || (digits.count == 11 && digits.hasPrefix("1")) {
+            return "+" + digits
+        }
+        return "+1" + (digits.hasPrefix("0") ? String(digits.dropFirst()) : digits)
     }
 
     /// The 0.3.1 group id: `group:` plus the sorted handle ROWIDs.

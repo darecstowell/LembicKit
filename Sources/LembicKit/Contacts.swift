@@ -214,8 +214,10 @@ public enum ContactsMap {
     public static func normalizeHandle(_ handle: String, defaultRegion: String = defaultRegion)
         -> String
     {
-        handle.contains("@")
-            ? handle.lowercased() : (normalizePhone(handle, defaultRegion: defaultRegion) ?? handle)
+        if handle.contains("@") { return handle.lowercased() }
+        // A business chat (`urn:biz:…`) or any other non-phone id is not a number.
+        if handle.contains(":") || handle.contains(where: \.isLetter) { return handle }
+        return normalizePhone(handle, defaultRegion: defaultRegion) ?? handle
     }
 
     /// Best-effort E.164. A `+` prefix is authoritative. An international exit code

@@ -31,6 +31,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Business chats keep their real id. `normalizeHandle` returns a handle with a
+  `:` (for example `urn:biz:…`) or a letter unchanged, so it no longer becomes
+  a fake phone number like `+186231245980123456789`. The 0.3.1 key stays in
+  `Conversation.legacyIDs` for migration (lembickit.md F18).
 - Old rows stored in seconds show their real date (2016, not 2000-12-31). One
   helper reads `message.date` as nanoseconds at or above 10^12 and as seconds
   below it, in the extractor, the event stream, the summaries, and

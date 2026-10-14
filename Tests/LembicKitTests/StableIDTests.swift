@@ -83,4 +83,14 @@ struct StableIDTests {
         #expect(ids.contains("chat:any;+18160000009"), "the 1:1 id is its chat GUID")
         #expect(ids.contains("chat:any;group-A"), "the stitched group takes its smallest chat GUID")
     }
+
+    @Test func businessChatKeepsItsOldKeyForMigration() {
+        let biz = "urn:biz:8a6f2c3e-1d2b-4c5d-9e8f-0123456789ab"
+        let rows = [summary(1, biz, 3, guid: "iMessage;-;" + biz, date: 100)]
+        let chat = Conversations.group(rows, contacts: [:])
+        #expect(chat.first?.displayName == biz)
+        #expect(
+            chat.first?.legacyIDs == [biz, "+186231245980123456789"],
+            "0.3.1 keyed this chat by a fake number")
+    }
 }

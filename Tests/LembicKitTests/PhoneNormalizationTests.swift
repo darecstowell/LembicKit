@@ -7,6 +7,14 @@ import Testing
 // or name resolution and the phone+email union silently degrade (issue #9).
 @Suite("phone normalization")
 struct PhoneNormalizationTests {
+    @Test func businessAndOtherNonPhoneHandlesStayAsIs() {
+        let biz = "urn:biz:8a6f2c3e-1d2b-4c5d-9e8f-0123456789ab"
+        #expect(ContactsMap.normalizeHandle(biz) == biz, "not a fake +1 number (lembickit.md F18)")
+        #expect(ContactsMap.normalizeHandle("chat123456789") == "chat123456789")
+        #expect(ContactsMap.normalizeHandle("Ana@Example.com") == "ana@example.com")
+        #expect(ContactsMap.normalizeHandle("(503) 555-0146") == "+15035550146")
+    }
+
     @Test func ukNationalWithRegion() {
         #expect(ContactsMap.normalizePhone("07911 123456", defaultRegion: "GB") == "+447911123456")
     }
@@ -21,7 +29,8 @@ struct PhoneNormalizationTests {
     }
 
     @Test func plusPrefixIsAuthoritativeAcrossRegions() {
-        #expect(ContactsMap.normalizePhone("+44 7911 123456", defaultRegion: "US") == "+447911123456")
+        #expect(
+            ContactsMap.normalizePhone("+44 7911 123456", defaultRegion: "US") == "+447911123456")
     }
 
     @Test func bareTenDigitDefaultsToUS() {
