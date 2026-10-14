@@ -1,33 +1,5 @@
 import Foundation
 
-/// A detection copy of one message body plus the map back to source UTF-16 offsets.
-/// Detectors run on `text`; every hit maps back through `sourceRange`.
-struct NormalizedText {
-    let text: NSString
-    /// For each UTF-16 unit of `text`, the source range it came from. Empty means identity.
-    private let map: [Range<Int>]
-
-    init(identity text: NSString) {
-        self.text = text
-        self.map = []
-    }
-
-    init(text: NSString, map: [Range<Int>]) {
-        self.text = text
-        self.map = map
-    }
-
-    var isIdentity: Bool { map.isEmpty }
-
-    func sourceRange(_ r: NSRange) -> Range<Int>? {
-        guard r.location != NSNotFound, r.length > 0, r.location + r.length <= text.length else {
-            return nil
-        }
-        guard !map.isEmpty else { return r.location..<(r.location + r.length) }
-        return map[r.location].lowerBound..<map[r.location + r.length - 1].upperBound
-    }
-}
-
 /// Undoes the character changes that hide a value from the detectors: full-width and
 /// other Unicode digits, circled and keycap digits, zero-width and bidi marks, soft
 /// hyphens, odd spaces and dashes, Cyrillic or Greek lookalikes inside Latin words,

@@ -85,9 +85,9 @@ struct NameMatcher: Sendable {
     }
 
     /// The alias substitutions in one body (overlaps are resolved by the caller).
-    func substitutions(in body: NSString) -> [Transcript.BodySubstitution] {
+    func substitutions(in body: NSString) -> [BodySplice.Substitution] {
         guard body.length > 0 else { return [] }
-        var out: [Transcript.BodySubstitution] = []
+        var out: [BodySplice.Substitution] = []
         let whole = NSRange(location: 0, length: body.length)
         for (regex, exact) in [(anyCase, false), (exactCase, true)] {
             guard let regex else { continue }
@@ -99,7 +99,7 @@ struct NameMatcher: Sendable {
                 guard let alias = exact ? aliasByExact[text] : aliasByLowercased[text.lowercased()]
                 else { return }
                 out.append(
-                    Transcript.BodySubstitution(range: range, token: alias, isRedaction: false))
+                    BodySplice.Substitution(range: range, token: alias, isRedaction: false))
             }
         }
         return out.sorted {

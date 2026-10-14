@@ -83,9 +83,9 @@ struct IdentityScrub: Sendable {
             out = out.replacingOccurrences(of: label, with: neutral)
         }
         let ns = out as NSString
-        let reps = Transcript.mergedRedactionSubstitutions(
+        let reps = BodySplice.mergedRedactions(
             SecretScrubber.ranges(in: ns, categories: categories) + Self.secrets(out, detectors))
-        return Transcript.applyReplacements(to: ns, reps)
+        return BodySplice.apply(to: ns, reps)
     }
 
     func records(_ rs: [MessageRecord]) -> [MessageRecord] {

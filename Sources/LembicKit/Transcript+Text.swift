@@ -128,7 +128,7 @@ extension Transcript {
             // Whole-message redaction? A nil range, a span over the entire source
             // text, or a stale span past its end. nil-guid records are never redacted.
             var whole: Redaction?
-            if let guid = r.guid, coversWholeMessage(r, redactions: redactions) {
+            if let guid = r.guid, BodySplice.coversWholeMessage(r, redactions: redactions) {
                 whole = Redaction(guid: guid, range: nil)
             }
             emit.append(
@@ -296,31 +296,16 @@ extension Transcript {
                 continue
             }
 
-            // -- Normal path with inline span redaction (+ in-body name aliasing
-            // when anonymizing). Redaction spans and name-alias mentions are
-            // modelled as one unified `[BodySubstitution]` list so they splice +
-            // offset-map through a SINGLE path: `OffsetMap` already supports a
-            // variable token length per replacement, so an alias (`PN`) and a
-            // `[redacted]` compose exactly. The no-anonymize path has an empty
-            // alias set ⇒ the list is the redaction spans alone, so the bytes are
-            // byte-identical to before (the goldens enforce this).
+            // -- Normal path: redactions, aliases, and the strip splice through
+            // `BodySplice`, the same path `renderedBody` and `.jsonl` use.
             let sourceNS = r.text as NSString
             let sourceLen = sourceNS.length
             let guid = r.guid
 
-            // The unified, non-overlapping, ascending replacement list — redaction
-            // spans (`[redacted]`) + in-body name aliases (`PN`), resolved
-            // redaction-wins — via the SHARED `bodyReplacements` helper, so the
-            // splice here is byte-identical to what `renderedBody` (the `.jsonl` +
-            // downstream-formatter path) produces.
-            let allReps = Self.bodyReplacements(
+            let allReps = BodySplice.substitutions(
                 source: sourceNS, guid: guid, redactions: redactions, names: names,
                 stripPlaceholders: r.stripPlaceholders)
-
-            // Build the transformed body (pre-indentation) by splicing every
-            // replacement; with no replacements this returns `r.text` unchanged
-            // (so the empty path is byte-identical).
-            let transformedBody = Self.applyReplacements(to: sourceNS, allReps)
+            let transformedBody = BodySplice.apply(to: sourceNS, allReps)
 
             // Indentation transform on the body (newline → newline+8sp).
             let indented =
@@ -329,17 +314,8 @@ extension Transcript {
                 : transformedBody
             let indentedNS = indented as NSString
 
-            // Offset map covering BOTH transforms (the unified replacement collapse
-            // + the newline→8-space expansion), in output-body coordinates. Forward
-            // (source→output) drives the marks below; inverse (output→source) drives
-            // `redactions(forSelectedOutput:)`. The map is fed the FULL unified set,
-            // so a selection over an aliased name reverses correctly.
-            let map = OffsetMap(
-                sourceLength: sourceLen,
-                replacements: allReps.map {
-                    (range: $0.range, tokenLen: ($0.token as NSString).length)
-                },
-                source: sourceNS)
+            // Forward map drives the marks below; inverse drives `redactions(forSelectedOutput:)`.
+            let map = BodySplice.offsetMap(source: sourceNS, allReps)
             if let guid { bodyMaps[guid] = map }
 
             // Append the line, recording the body's output range. `bodyStart` is

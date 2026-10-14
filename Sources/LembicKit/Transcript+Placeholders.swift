@@ -17,12 +17,12 @@ extension Transcript {
     /// no real attachment is left alone (rare edge, acceptable for a trim).
     static func stripPlaceholders(_ s: String) -> String {
         let source = s as NSString
-        return applyReplacements(to: source, placeholderStripSubstitutions(source))
+        return BodySplice.apply(to: source, placeholderStripSubstitutions(source))
     }
 
     /// The placeholder strip as substitutions in SOURCE offsets, so it composes with
     /// redaction spans and the `OffsetMap` instead of shifting them.
-    static func placeholderStripSubstitutions(_ source: NSString) -> [BodySubstitution] {
+    static func placeholderStripSubstitutions(_ source: NSString) -> [BodySplice.Substitution] {
         let length = source.length
         guard length > 0 else { return [] }
         var isToken = [Bool](repeating: false, count: length)
@@ -57,12 +57,14 @@ extension Transcript {
         var head = 0
         while head < length, isEdge(head) { head += 1 }
         guard head < length else {
-            return [BodySubstitution(range: 0..<length, token: "", isRedaction: false)]
+            return [BodySplice.Substitution(range: 0..<length, token: "", isRedaction: false)]
         }
         var tail = length
         while tail > head, isEdge(tail - 1) { tail -= 1 }
-        var out: [BodySubstitution] = []
-        if head > 0 { out.append(BodySubstitution(range: 0..<head, token: "", isRedaction: false)) }
+        var out: [BodySplice.Substitution] = []
+        if head > 0 {
+            out.append(BodySplice.Substitution(range: 0..<head, token: "", isRedaction: false))
+        }
         var k = head
         while k < tail {
             guard isToken[k] || isSpace(k) else {
@@ -72,12 +74,12 @@ extension Transcript {
             var end = k
             while end < tail, isToken[end] || isSpace(end) { end += 1 }
             if !(end - k == 1 && source.character(at: k) == 0x20) {
-                out.append(BodySubstitution(range: k..<end, token: " ", isRedaction: false))
+                out.append(BodySplice.Substitution(range: k..<end, token: " ", isRedaction: false))
             }
             k = end
         }
         if tail < length {
-            out.append(BodySubstitution(range: tail..<length, token: "", isRedaction: false))
+            out.append(BodySplice.Substitution(range: tail..<length, token: "", isRedaction: false))
         }
         return out
     }
