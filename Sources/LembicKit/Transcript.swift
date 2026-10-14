@@ -195,13 +195,17 @@ public enum Transcript {
     /// `.jsonl` speaker labels can never diverge. The mapping itself is never
     /// written into the output, so an assistant can't tell which Person is the
     /// user — which is the point.
-    static func anonymizationMap(for records: [MessageRecord]) -> [String: String] {
+    static func anonymizationMap(
+        for records: [MessageRecord], knownNames: [String: [String]] = [:]
+    ) -> [String: String] {
         var seen: [String] = []
         func note(_ label: String) { if !seen.contains(label) { seen.append(label) } }
         for r in records {
             note(r.speaker)
             for reaction in r.reactions { note(reaction.by) }
         }
+        // Labels the caller names but that never spoke (a quiet group member).
+        for label in knownNames.keys.sorted() { note(label) }
         // Float the owner to the front (stable order for everyone else).
         let ordered = seen.filter { $0 == meLabel } + seen.filter { $0 != meLabel }
         var map: [String: String] = [:]
@@ -307,7 +311,7 @@ public enum Transcript {
         guard guid != nil else { return text }
         let source = text as NSString
         let reps = bodyReplacements(
-            source: source, guid: guid, redactions: redactions, aliases: [:])
+            source: source, guid: guid, redactions: redactions, names: nil)
         return applyReplacements(to: source, reps)
     }
 
@@ -324,54 +328,6 @@ public enum Transcript {
         let range: Range<Int>
         let token: String
         let isRedaction: Bool
-    }
-
-    /// The in-body name-alias substitutions for one message under `anonymize`:
-    /// every whole-word, case-insensitive mention of a known participant NAME,
-    /// mapped to that participant's stable `PN` alias (so "tell Sarah hi" →
-    /// "tell P2 hi"). Empty when not anonymizing or when the body mentions no
-    /// participant. Reuses the SAME `aliases` map the speaker relabeling uses, so
-    /// the in-body alias and the speaker prefix always agree.
-    ///
-    /// Only real NAMES are aliased: the owner label `"Me"`, the generic `"Them"`,
-    /// and any label that is a formatted phone number (all digits / punctuation /
-    /// whitespace, no letter) are skipped — those are not names worth pseudonymizing
-    /// in the body, and `"Them"` would over-match the common English word. NO NER /
-    /// no third-party-name detection — exact-match against the known participant
-    /// labels only.
-    static func nameAliasReplacements(
-        in body: NSString, aliases: [String: String]
-    ) -> [BodySubstitution] {
-        guard !aliases.isEmpty, body.length > 0 else { return [] }
-        var out: [BodySubstitution] = []
-        // Stable order (longest label first) so a label that is a substring of a
-        // longer one can't pre-empt the longer match; ties broken by the label so
-        // the scan is deterministic.
-        let labels = aliases.keys
-            .filter { isAliasableName($0) }
-            .sorted { $0.count != $1.count ? $0.count > $1.count : $0 < $1 }
-        let whole = NSRange(location: 0, length: body.length)
-        for label in labels {
-            guard let alias = aliases[label] else { continue }
-            // Whole-word, case-insensitive literal match on the label. `\Q…\E`
-            // quotes the label so any regex metacharacters in a name are literal.
-            let pattern = #"(?i)\b\#(NSRegularExpression.escapedPattern(for: label))\b"#
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            regex.enumerateMatches(in: body as String, range: whole) { match, _, _ in
-                guard let match, match.range.length > 0, let range = Range(match.range)
-                else { return }
-                out.append(BodySubstitution(range: range, token: alias, isRedaction: false))
-            }
-        }
-        return out
-    }
-
-    /// True when a participant label is a real, aliasable NAME: not the owner
-    /// label `"Me"`, not the generic `"Them"`, and not a formatted phone number
-    /// (a label with no letter — all digits / punctuation / whitespace).
-    static func isAliasableName(_ label: String) -> Bool {
-        if label == meLabel || label == "Them" { return false }
-        return label.contains { $0.isLetter }
     }
 
     /// Two half-open ranges intersect.
@@ -451,7 +407,7 @@ public enum Transcript {
     /// `source` is the message body as an `NSString` (UTF-16 offsets); `guid` is
     /// nil-safe (a nil-guid message has no redactions, only aliases can apply).
     static func bodyReplacements(
-        source: NSString, guid: String?, redactions: RedactionSet, aliases: [String: String],
+        source: NSString, guid: String?, redactions: RedactionSet, names: NameMatcher?,
         stripPlaceholders: Bool = false
     ) -> [BodySubstitution] {
         let sourceLen = source.length
@@ -473,7 +429,7 @@ public enum Transcript {
         // (b) In-body name-alias replacements (anonymize only; empty otherwise).
         // On overlap with a redaction span the REDACTION wins — the value already
         // reads `[redacted]`.
-        let aliasReps = Self.nameAliasReplacements(in: source, aliases: aliases)
+        let aliasReps = (names?.substitutions(in: source) ?? [])
             .filter { a in
                 !redactionReps.contains { r in rangesOverlap(a.range, r.range) }
             }
@@ -524,12 +480,15 @@ public enum Transcript {
     public static func renderedBody(
         of record: MessageRecord, redactions: RedactionSet, aliases: [String: String]
     ) -> String? {
-        renderedBody(of: record, redactions: redactions, aliases: aliases, stripPlaceholders: false)
+        renderedBody(
+            of: record, redactions: redactions,
+            names: aliases.isEmpty ? nil : NameMatcher(aliases: aliases), stripPlaceholders: false)
     }
 
-    /// `renderedBody` with the optional placeholder strip, applied in source offsets.
+    /// `renderedBody` with a prebuilt name matcher and the optional placeholder strip,
+    /// both applied in source offsets.
     static func renderedBody(
-        of record: MessageRecord, redactions: RedactionSet, aliases: [String: String],
+        of record: MessageRecord, redactions: RedactionSet, names: NameMatcher?,
         stripPlaceholders: Bool
     ) -> String? {
         if let guid = record.guid {
@@ -541,7 +500,7 @@ public enum Transcript {
         }
         let source = record.text as NSString
         let reps = bodyReplacements(
-            source: source, guid: record.guid, redactions: redactions, aliases: aliases,
+            source: source, guid: record.guid, redactions: redactions, names: names,
             stripPlaceholders: stripPlaceholders)
         return applyReplacements(to: source, reps)
     }
@@ -552,6 +511,7 @@ public enum Transcript {
         anonymize: Bool = false,
         group: GroupRenderInfo? = nil,
         systemEvents: [SystemEvent] = [],
+        knownNames: [String: [String]] = [:],
         timeZone: TimeZone = .current
     ) -> RenderResult {
         let day = formatter("yyyy-MM-dd", timeZone: timeZone)
@@ -561,7 +521,8 @@ public enum Transcript {
         // Speaker → "Person N" map when de-biasing; empty otherwise (alias lookups
         // fall through to the real label). Built from the raw records so the .txt
         // and .jsonl maps are identical (same input set).
-        let aliases = anonymize ? anonymizationMap(for: records) : [:]
+        let aliases = anonymize ? anonymizationMap(for: records, knownNames: knownNames) : [:]
+        let names = anonymize ? NameMatcher(aliases: aliases, knownNames: knownNames) : nil
         func alias(_ speaker: String) -> String { aliases[speaker] ?? speaker }
 
         // Group detected secrets by guid for O(1) lookup per message.
@@ -763,7 +724,7 @@ public enum Transcript {
             // splice here is byte-identical to what `renderedBody` (the `.jsonl` +
             // downstream-formatter path) produces.
             let allReps = Self.bodyReplacements(
-                source: sourceNS, guid: guid, redactions: redactions, aliases: aliases,
+                source: sourceNS, guid: guid, redactions: redactions, names: names,
                 stripPlaceholders: r.stripPlaceholders)
 
             // Build the transformed body (pre-indentation) by splicing every
@@ -874,19 +835,23 @@ public enum Transcript {
     public static func jsonLines(
         records: [MessageRecord], redactions: RedactionSet = RedactionSet(),
         anonymize: Bool = false,
+        knownNames: [String: [String]] = [:],
         timeZone: TimeZone = .current
     ) -> String {
         let full = formatter("yyyy-MM-dd HH:mm:ss", timeZone: timeZone)
         // Same speaker → "Person N" map the .txt path uses, so the two outputs
         // label identically. Empty when not anonymizing (lookups fall through).
-        let aliases = anonymize ? anonymizationMap(for: records) : [:]
+        let aliases = anonymize ? anonymizationMap(for: records, knownNames: knownNames) : [:]
+        let names = anonymize ? NameMatcher(aliases: aliases, knownNames: knownNames) : nil
         var out = ""
         for r in records {
             // Whole-message redaction → omit the object (no jsonl tombstone).
             // `renderedBody` returns nil for it; nil-guid records can never be
             // whole-redacted, so they always render. The body is the SAME unified
             // splice (redactions + in-body aliases) the `.txt` path shows.
-            guard let body = Self.renderedBody(of: r, redactions: redactions, aliases: aliases)
+            guard
+                let body = Self.renderedBody(
+                    of: r, redactions: redactions, names: names, stripPlaceholders: false)
             else { continue }
             var fields: [(String, String)] = [
                 ("d", jsonString(full.string(from: r.date))),

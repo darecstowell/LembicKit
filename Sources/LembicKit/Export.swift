@@ -117,12 +117,17 @@ extension Export {
         /// "flag for review" toggle. **Default = all cases** (detectors on), so
         /// the rendered output / highlight marks are byte-identical to today.
         public var enabledDetectors: Set<SecretCategory>
+        /// Names a speaker label stands for, keyed by label (for example
+        /// `["Them": ["Sarah Chen"], "Me": ["Darec Stowell"], "Mike R.": ["Mike Rogers"]]`).
+        /// Under `anonymizeSpeakers`, each name and each part of it reads as that speaker's alias.
+        public var knownNames: [String: [String]]
 
         public init(
             dateRange: ClosedRange<Date>? = nil, trim: Transcript.TrimOptions = .none,
             anonymizeSpeakers: Bool = false, showSystemEvents: Bool = false,
             enabledScrubbers: Set<ScrubberCategory> = [],
-            enabledDetectors: Set<SecretCategory> = Set(SecretCategory.allCases)
+            enabledDetectors: Set<SecretCategory> = Set(SecretCategory.allCases),
+            knownNames: [String: [String]] = [:]
         ) {
             self.dateRange = dateRange
             self.trim = trim
@@ -130,6 +135,7 @@ extension Export {
             self.showSystemEvents = showSystemEvents
             self.enabledScrubbers = enabledScrubbers
             self.enabledDetectors = enabledDetectors
+            self.knownNames = knownNames
         }
 
         /// Full history, no trim.
@@ -225,10 +231,39 @@ extension Export {
         } else {
             systemEvents = []
         }
+        var named = scope
+        named.knownNames = Export.knownNames(
+            for: conversation, labels: labels, adding: scope.knownNames)
         return Export.render(
             records: records, number: conversation.primaryIdentifier,
-            formats: formats, scope: scope, redactions: redactions, detect: detect,
+            formats: formats, scope: named, redactions: redactions, detect: detect,
             group: Export.groupRenderInfo(for: conversation), systemEvents: systemEvents)
+    }
+
+    /// The names each speaker label stands for in `conversation`: the contact name
+    /// for "Them" in a 1:1, and each group member's full contact name keyed by roster
+    /// label. `labels` is the resolved handle-to-name map. `extra` is added on top.
+    public static func knownNames(
+        for conversation: Conversation, labels: [Int64: String],
+        adding extra: [String: [String]] = [:]
+    ) -> [String: [String]] {
+        var names = extra
+        func add(_ label: String, _ name: String?) {
+            guard let name, name.contains(where: \.isLetter), !name.contains("@") else { return }
+            if !(names[label] ?? []).contains(name) { names[label, default: []].append(name) }
+        }
+        if conversation.isGroup {
+            for p in conversation.participants {
+                let label = p.label ?? labels[p.handleID] ?? p.identifier
+                guard NameMatcher.isAliasableName(label) else { continue }
+                if names[label] == nil { names[label] = [] }
+                add(label, labels[p.handleID])
+            }
+        } else {
+            add("Them", conversation.displayName)
+            for handle in conversation.targetHandles { add("Them", labels[handle]) }
+        }
+        return names
     }
 
     /// The `Transcript.GroupRenderInfo` for a group conversation (the roster
@@ -295,11 +330,13 @@ extension Export {
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
-        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: scope)
+        var scope = scope
+        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: &scope)
         // The PN alias map is built from the date-filtered set — the same input
         // `compactText`/`jsonLines` see — so the speaker numbering is identical.
         let aliases =
-            scope.anonymizeSpeakers ? Transcript.anonymizationMap(for: filtered) : [:]
+            scope.anonymizeSpeakers
+            ? Transcript.anonymizationMap(for: filtered, knownNames: scope.knownNames) : [:]
 
         var out: [MessageRecord] = []
         out.reserveCapacity(filtered.count)
@@ -343,8 +380,11 @@ extension Export {
 
     /// `records` with identifier speaker labels and reaction authors made neutral
     /// when a scrubber is on (the same labels `render` shows).
-    static func identityScrubbed(_ records: [MessageRecord], scope: Scope) -> [MessageRecord] {
-        IdentityScrub(categories: scope.enabledScrubbers, records: records).records(records)
+    static func identityScrubbed(_ records: [MessageRecord], scope: inout Scope) -> [MessageRecord]
+    {
+        let identity = IdentityScrub(categories: scope.enabledScrubbers, records: records)
+        scope.knownNames = identity.knownNames(scope.knownNames)
+        return identity.records(records)
     }
 
     /// The **effective** redaction set for a render: the caller's manual
@@ -399,14 +439,19 @@ extension Export {
     ) -> [MessageRecord] {
         // The same date-filtered slice the renderer scans, so the scrubber fold and
         // the body render see exactly what is exported.
-        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: scope)
+        var scope = scope
+        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: &scope)
         let effective = Self.effectiveRedactions(
             manual: redactions, records: filtered, scope: scope)
         // The speaker→PN map, built from the date-filtered set so the in-body alias
         // numbering matches `compactText`/`jsonLines` exactly. Empty when not
         // anonymizing (so `renderedBody` aliases nothing).
         let aliases =
-            scope.anonymizeSpeakers ? Transcript.anonymizationMap(for: filtered) : [:]
+            scope.anonymizeSpeakers
+            ? Transcript.anonymizationMap(for: filtered, knownNames: scope.knownNames) : [:]
+        let names =
+            scope.anonymizeSpeakers
+            ? NameMatcher(aliases: aliases, knownNames: scope.knownNames) : nil
 
         var out: [MessageRecord] = []
         out.reserveCapacity(filtered.count)
@@ -418,8 +463,7 @@ extension Export {
             if strip, Transcript.stripPlaceholders(record.text).isEmpty { continue }
             guard
                 let body = Transcript.renderedBody(
-                    of: record, redactions: effective, aliases: aliases,
-                    stripPlaceholders: strip)
+                    of: record, redactions: effective, names: names, stripPlaceholders: strip)
             else { continue }
             out.append(prepared(record, text: body, scope: scope, aliases: aliases))
         }
@@ -487,6 +531,7 @@ extension Export {
         let identity = IdentityScrub(
             categories: scope.enabledScrubbers, records: filtered, group: group)
         let shown = identity.records(filtered)
+        let knownNames = identity.knownNames(scope.knownNames)
 
         var txt: String?
         var result: Transcript.RenderResult?
@@ -495,7 +540,7 @@ extension Export {
                 records: shown, number: identity.identifier(number), trim: scope.trim,
                 redactions: effectiveRedactions, detected: detected,
                 anonymize: scope.anonymizeSpeakers, group: identity.group(group),
-                systemEvents: identity.events(scopedEvents))
+                systemEvents: identity.events(scopedEvents), knownNames: knownNames)
             txt = rendered.text
             result = rendered
         }
@@ -503,7 +548,7 @@ extension Export {
             formats.contains(.jsonl)
             ? Transcript.jsonLines(
                 records: shown, redactions: effectiveRedactions,
-                anonymize: scope.anonymizeSpeakers) : nil
+                anonymize: scope.anonymizeSpeakers, knownNames: knownNames) : nil
 
         return Rendered(
             txt: txt, jsonl: jsonl, result: result, detected: detected,

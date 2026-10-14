@@ -46,7 +46,7 @@ These are the core nouns, drawn from the actual type names.
 
 **DetectedSecret** (`Redaction.swift`). One found secret: `guid`, a UTF-16 `range`, and a `SecretCategory`. Drives the amber highlight on still-visible secrets.
 
-**Anonymization map (P1/P2 aliases)** (`Transcript.swift`). `anonymizationMap` builds a stable speaker-to-`PN` map. The account owner ("Me") anchors to P1; every other distinct speaker is numbered by first appearance. Under `anonymize`, speaker prefixes, reaction authors, and whole-word in-body mentions of a known participant name all rewrite to the alias, and the counterparty's number/name is scrubbed from the header. The map is never written into the output, so a reader cannot tell which Person is the user.
+**Anonymization map (P1/P2 aliases)** (`Transcript.swift`). `anonymizationMap` builds a stable speaker-to-`PN` map. The account owner ("Me") anchors to P1; every other distinct speaker is numbered by first appearance. Under `anonymize`, speaker prefixes, reaction authors, and in-body mentions of a known name all rewrite to the alias, and the counterparty's number/name is scrubbed from the header. Known names are the speaker labels plus `Export.Scope.knownNames` (label to full names, such as the contact name for "Them" and the owner's name for "Me"); every part of a name matches too (`NameMatcher`). A part shared by two people reads `[name]`, and a name that is also a common word ("Will") matches only as written. The map is never written into the output, so a reader cannot tell which Person is the user.
 
 **BIP39** (`BIP39Wordlist.swift`). The 2048-word BIP-39 English wordlist in canonical order. Array index is the 11-bit value, so the order is load-bearing for the seed-phrase checksum. Sourced from the MIT-licensed `bitcoin/bips` reference list.
 
@@ -63,6 +63,7 @@ These are the core nouns, drawn from the actual type names.
 | `RedactionMap.swift` | Source-to-output UTF-16 offset map for one message body | `OffsetMap` (internal) |
 | `SecretDetector.swift` | On-device detection of high-harm secrets (flag for review) | `SecretDetector.detect` |
 | `SecretScrubber.swift` | On-device opt-in auto-remove of ubiquitous PII | `SecretScrubber.scrub` |
+| `NameMatcher.swift` | Finds known names and name parts in message text for anonymize | `NameMatcher` (internal), `Export.knownNames(for:labels:adding:)` |
 | `IdentityScrub.swift` | Carries enabled scrubbers to the header identifier, group name, roster, speaker labels, reaction authors, and event lines (an identifier label becomes `Member N`) | `IdentityScrub` (internal) |
 | `Contacts.swift` | Build the normalized-handle to name/avatar map; handle normalization | `ContactsMap`, `buildContactInfo`, `normalizeHandle`, `normalizePhone`, `resolve` |
 | `Attachments.swift` | Typed attachment placeholder mapping | `AttachmentInfo`, `AttachmentInfo.placeholder` |

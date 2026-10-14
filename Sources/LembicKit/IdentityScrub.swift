@@ -90,6 +90,13 @@ struct IdentityScrub: Sendable {
         }
     }
 
+    func knownNames(_ names: [String: [String]]) -> [String: [String]] {
+        guard !labelMap.isEmpty else { return names }
+        var out: [String: [String]] = [:]
+        for (key, value) in names { out[label(key), default: []].append(contentsOf: value) }
+        return out
+    }
+
     func group(_ g: Transcript.GroupRenderInfo?) -> Transcript.GroupRenderInfo? {
         guard isActive, let g else { return g }
         return Transcript.GroupRenderInfo(
