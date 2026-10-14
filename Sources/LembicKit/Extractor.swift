@@ -210,7 +210,8 @@ public struct Extractor: Sendable {
                        \(cols.column("at", "attachment", "uti")) uti,
                        \(cols.column("at", "attachment", "transfer_name")) transfer_name,
                        \(cols.column("at", "attachment", "is_sticker")) is_sticker,
-                       \(cols.column("at", "attachment", "emoji_image_short_description")) genmoji
+                       \(cols.column("at", "attachment", "emoji_image_short_description")) genmoji,
+                       \(cols.column("at", "attachment", "guid")) aguid
                 FROM chat_message_join cmj
                 JOIN message_attachment_join maj ON maj.message_id = cmj.message_id
                 JOIN attachment at ON at.ROWID = maj.attachment_id
@@ -223,8 +224,9 @@ public struct Extractor: Sendable {
             guard seenLinks.insert(majid).inserted else { continue }
             let info = AttachmentInfo(
                 mimeType: row["mime_type"], uti: row["uti"], transferName: row["transfer_name"],
-                isSticker: (row["is_sticker"] as Int64? ?? 0) != 0, emojiDescription: row["genmoji"]
-            )
+                isSticker: (row["is_sticker"] as Int64? ?? 0) != 0,
+                emojiDescription: row["genmoji"],
+                guid: row["aguid"])
             map[row["mid"], default: []].append(info)
         }
         return map
@@ -241,29 +243,31 @@ public struct Extractor: Sendable {
     ) -> (text: String, hadAttachment: Bool, flags: MessageRecord.Flags) {
         let (raw, objects, flags) = readBody(attributedBody, fallbackText: fallbackText)
         let isAppMessage = !(balloonBundleID ?? "").isEmpty
-        let placeholders = attachments.map(\.placeholder)
+        var unused = Array(attachments.indices)
         var hadAttachment = false
 
         let parts = raw.components(separatedBy: "\u{FFFC}")
         var out = parts[0]
-        var index = 0
         for i in 1..<parts.count {
-            var placeholder = index < placeholders.count ? placeholders[index] : nil
-            if index < objects.count,
-                let words = transcription(objects[index][AttributedBody.audioTranscriptionKey])
-            {
+            let attributes = i - 1 < objects.count ? objects[i - 1] : [:]
+            // The attachment this mark names, else the next one in join order.
+            let named = attributes[AttributedBody.fileTransferGUIDKey].flatMap { guid in
+                unused.firstIndex { attachments[$0].matches(transferGUID: guid) }
+            }
+            let slot = named ?? (unused.isEmpty ? nil : 0)
+            var placeholder = slot.flatMap { attachments[unused.remove(at: $0)].placeholder }
+            if let words = transcription(attributes[AttributedBody.audioTranscriptionKey]) {
                 placeholder = "[audio: \"\(words)\"]"
-            } else if index >= placeholders.count, !isAppMessage {
+            } else if slot == nil, !isAppMessage {
                 placeholder = "[attachment]"
             }
-            index += 1
             if let placeholder {
                 out += " " + placeholder + " "
                 hadAttachment = true
             }
             out += parts[i]
         }
-        let leftover = placeholders[min(index, placeholders.count)...].compactMap(\.self)
+        let leftover = unused.compactMap { attachments[$0].placeholder }
         if !leftover.isEmpty {
             hadAttachment = true
             out += " " + leftover.joined(separator: " ")

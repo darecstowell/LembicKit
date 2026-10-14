@@ -8,11 +8,14 @@ public struct AttachmentInfo: Sendable {
     public let isSticker: Bool
     /// A Genmoji's description (`attachment.emoji_image_short_description`).
     public let emojiDescription: String?
+    /// `attachment.guid`, which the body's U+FFFC marks name.
+    public let guid: String?
 
     public init(
         mimeType: String?, uti: String?, transferName: String?, isSticker: Bool = false,
-        emojiDescription: String? = nil
+        emojiDescription: String? = nil, guid: String? = nil
     ) {
+        self.guid = guid
         self.mimeType = mimeType
         self.uti = uti
         self.transferName = transferName
@@ -55,5 +58,18 @@ public struct AttachmentInfo: Sendable {
             return "[audio]"
         }
         return "[attachment]"
+    }
+
+    /// True when a body's transfer GUID names this attachment. Either side may
+    /// carry an `at_<part>_` prefix.
+    func matches(transferGUID: String) -> Bool {
+        guard let guid, !guid.isEmpty else { return false }
+        return guid == transferGUID || Self.bare(guid) == Self.bare(transferGUID)
+    }
+
+    private static func bare(_ guid: String) -> Substring {
+        let parts = guid.split(separator: "_", maxSplits: 2, omittingEmptySubsequences: false)
+        return parts.count == 3 && parts[0] == "at" && Int(parts[1]) != nil
+            ? parts[2] : Substring(guid)
     }
 }

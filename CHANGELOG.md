@@ -31,6 +31,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Attachment placeholders sit where they belong. Each U+FFFC pairs with the
+  attachment its `__kIMFileTransferGUIDAttributeName` names (`attachment.guid`,
+  new `AttachmentInfo.guid`), and falls back to join order only when no GUID
+  matches (lembickit.md F16).
 - The group roster is complete and correct. A person who wrote in the group or
   was added or removed, but is no longer a member, is listed after the members
   as "Carla (left)" (`Participant.isFormer`, `GroupRenderInfo.formerLabels`) and
