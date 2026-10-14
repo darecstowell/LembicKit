@@ -288,7 +288,7 @@ public struct Extractor: Sendable {
             out += " " + leftover.joined(separator: " ")
         }
 
-        out = normalizeWhitespace(out)
+        out = normalizeWhitespace(normalizeLineBreaks(out))
         if let bundle = balloonBundleID, !bundle.isEmpty,
             let token = AppMessage.token(bundleID: bundle, payload: payload)
         {
@@ -338,6 +338,29 @@ public struct Extractor: Sendable {
             words.split(whereSeparator: \.isNewline).joined(separator: " ")
         ).trimmingCharacters(in: .whitespaces)
         return line.isEmpty ? nil : line
+    }
+
+    /// Every line break (`\r\n`, `\r`, U+2028, U+2029, U+0085) becomes `\n`, and
+    /// every other C0 control except tab becomes a space.
+    static func normalizeLineBreaks(_ s: String) -> String {
+        let needsWork = s.utf8.contains { (byte: UInt8) -> Bool in
+            if byte == 0xE2 || byte == 0xC2 { return true }
+            return byte < 0x20 && byte != 0x0A && byte != 0x09
+        }
+        guard needsWork else { return s }
+        var out = String.UnicodeScalarView()
+        var afterCR = false
+        for scalar in s.unicodeScalars {
+            defer { afterCR = scalar == "\r" }
+            switch scalar.value {
+            case 0x0A where afterCR: continue
+            case 0x0D, 0x2028, 0x2029, 0x85: out.append("\n")
+            case 0x0A, 0x09: out.append(scalar)
+            case 0x00..<0x20: out.append(" ")
+            default: out.append(scalar)
+            }
+        }
+        return String(out)
     }
 
     /// Per line: collapse runs of space/tab to one space, strip edges; then
@@ -433,7 +456,7 @@ public struct Extractor: Sendable {
             db,
             sql: """
                 SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id,
-                       \(m("service")) service, \(m("text")) text,
+                       \(m("service")) service, CAST(\(m("text")) AS BLOB) text,
                        \(m("attributedBody")) attributedBody, \(m("item_type")) item_type,
                        \(m("associated_message_type")) amt, \(m("associated_message_guid")) amg,
                        \(m("associated_message_emoji")) ame,
@@ -514,7 +537,7 @@ public struct Extractor: Sendable {
             let payload: Data? = row["payload_data"]
             var (text, hadAttachment, flags) = Self.renderText(
                 attributedBody: row["attributedBody"],
-                fallbackText: row["text"],
+                fallbackText: (row["text"] as Data?).map { String(decoding: $0, as: UTF8.self) },
                 balloonBundleID: row["balloon_bundle_id"],
                 attachments: attachmentMap[rowid] ?? [],
                 payload: payload)

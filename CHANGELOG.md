@@ -34,6 +34,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Every line break indents like a newline, and a NUL no longer cuts a message.
+  `\r\n`, `\r`, U+2028, U+2029, and U+0085 become `\n`, other C0 controls
+  except tab become a space, and the `text` column is read as bytes
+  (lembickit.md F22).
 - A received row with a NULL, 0, or unknown `handle_id` no longer reads "h0".
   In a 1:1 every row not from the owner is "Them" (reactions too, so they net
   with the counterparty's). In a group such a row is "Unknown sender", and an
