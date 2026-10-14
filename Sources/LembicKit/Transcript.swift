@@ -133,6 +133,88 @@ public enum Transcript {
         return kinds.map(\.token).filter(found.contains)
     }
 
+    /// The local date and time strings the renderer prints, without a
+    /// DateFormatter call per message. Dates with a fractional second or outside years 1000 to 9999 use a
+    /// DateFormatter, so the output is always the formatter's.
+    final class LocalClock {
+        private let timeZone: TimeZone
+        private var offset = 0
+        private var dayNumber = Int.min
+        private var dayText = ""
+        private lazy var formatters = (
+            day: Transcript.formatter("yyyy-MM-dd", timeZone: timeZone),
+            weekday: Transcript.formatter("EEE", timeZone: timeZone),
+            time: Transcript.formatter("HH:mm", timeZone: timeZone),
+            stamp: Transcript.formatter("yyyy-MM-dd'T'HH:mm:ssxxx", timeZone: timeZone)
+        )
+        private static let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        private static let twoDigits = (0..<100).map { $0 < 10 ? "0\($0)" : "\($0)" }
+
+        init(timeZone: TimeZone) { self.timeZone = timeZone }
+
+        /// Local seconds since 1970, or nil when the fast path does not apply.
+        private func localSeconds(_ date: Date) -> Int? {
+            let t = date.timeIntervalSince1970
+            guard t == t.rounded(.down), t > -30_000_000_000, t < 250_000_000_000 else {
+                return nil
+            }
+            offset = timeZone.secondsFromGMT(for: date)
+            return Int(t) + offset
+        }
+
+        private func days(_ seconds: Int) -> Int {
+            seconds >= 0 ? seconds / 86_400 : (seconds - 86_399) / 86_400
+        }
+
+        func day(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else { return formatters.day.string(from: date) }
+            let number = days(seconds)
+            if number != dayNumber {
+                // Days since 1970 to a Gregorian date (H. Hinnant, civil_from_days).
+                let z = number + 719_468
+                let era = (z >= 0 ? z : z - 146_096) / 146_097
+                let doe = z - era * 146_097
+                let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+                let mp = (5 * doy + 2) / 153
+                let d = doy - (153 * mp + 2) / 5 + 1
+                let m = mp < 10 ? mp + 3 : mp - 9
+                let y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+                guard (1000...9999).contains(y) else { return formatters.day.string(from: date) }
+                dayNumber = number
+                dayText = "\(y)-\(Self.twoDigits[m])-\(Self.twoDigits[d])"
+            }
+            return dayText
+        }
+
+        func weekday(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else {
+                return formatters.weekday.string(from: date)
+            }
+            return Self.weekdays[((days(seconds) + 4) % 7 + 7) % 7]
+        }
+
+        func time(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else {
+                return formatters.time.string(from: date)
+            }
+            let s = seconds - days(seconds) * 86_400
+            return "\(Self.twoDigits[s / 3600]):\(Self.twoDigits[s % 3600 / 60])"
+        }
+
+        /// ISO 8601 with the UTC offset, as `yyyy-MM-dd'T'HH:mm:ssxxx`.
+        func stamp(_ date: Date) -> String {
+            guard let seconds = localSeconds(date), !day(date).isEmpty, dayNumber == days(seconds)
+            else { return formatters.stamp.string(from: date) }
+            let s = seconds - days(seconds) * 86_400
+            let sign = offset < 0 ? "-" : "+"
+            let off = abs(offset)
+            return "\(dayText)T\(Self.twoDigits[s / 3600]):\(Self.twoDigits[s % 3600 / 60]):"
+                + "\(Self.twoDigits[s % 60])\(sign)\(Self.twoDigits[off / 3600]):"
+                + Self.twoDigits[off % 3600 / 60]
+        }
+    }
+
     /// Each DST fall-back hour between two dates: the instants whose local clock
     /// time happens twice.
     static func repeatedHours(from start: Date, to end: Date, in timeZone: TimeZone)
@@ -532,9 +614,7 @@ public enum Transcript {
         timeZone: TimeZone = .current,
         noteToSelf: Bool = false
     ) -> RenderResult {
-        let day = formatter("yyyy-MM-dd", timeZone: timeZone)
-        let weekday = formatter("EEE", timeZone: timeZone)
-        let time = formatter("HH:mm", timeZone: timeZone)
+        let local = LocalClock(timeZone: timeZone)
 
         // Speaker → "Person N" map when de-biasing; empty otherwise (alias lookups
         // fall through to the real label). Built from the raw records so the .txt
@@ -619,7 +699,7 @@ public enum Transcript {
                 parts.append("\(comma(withAttachments)) with attachments")
             }
             out +=
-                "# \(day.string(from: first.date)) → \(day.string(from: last.date)) · "
+                "# \(local.day(first.date)) → \(local.day(last.date)) · "
                 + parts.joined(separator: " · ") + "\n"
         }
         if let group, renderGroup {
@@ -690,16 +770,16 @@ public enum Transcript {
         let zone = formatter("HH:mm zzz", timeZone: timeZone)
         func clock(_ date: Date) -> String {
             repeated.contains { $0.contains(date) }
-                ? zone.string(from: date) : time.string(from: date)
+                ? zone.string(from: date) : local.time(date)
         }
         // Open the day section for `date` if it isn't the current one — shared by
         // the message loop and the event flush so an event that starts a new day
         // gets its own `## YYYY-MM-DD` header.
         func openDaySection(for date: Date) {
-            let d = day.string(from: date)
+            let d = local.day(date)
             if d != currentDay {
                 currentDay = d
-                acc.append("\n## \(d) (\(weekday.string(from: date)))\n")
+                acc.append("\n## \(d) (\(local.weekday(date)))\n")
             }
         }
         // Emit every pending event at or before `boundary` (nil ⇒ drain all),
@@ -729,7 +809,7 @@ public enum Transcript {
                 var j = i
                 while j < emit.count,
                     emit[j].whole != nil,
-                    day.string(from: emit[j].date) == currentDay
+                    local.day(emit[j].date) == currentDay
                 {
                     j += 1
                 }
@@ -877,7 +957,7 @@ public enum Transcript {
         anonymize: Bool = false,
         timeZone: TimeZone = .current
     ) -> String {
-        let full = formatter("yyyy-MM-dd'T'HH:mm:ssxxx", timeZone: timeZone)
+        let local = LocalClock(timeZone: timeZone)
         // Same speaker → "Person N" map the .txt path uses, so the two outputs
         // label identically. Empty when not anonymizing (lookups fall through).
         let aliases = anonymize ? anonymizationMap(for: records) : [:]
@@ -890,7 +970,7 @@ public enum Transcript {
             guard let body = Self.renderedBody(of: r, redactions: redactions, aliases: aliases)
             else { continue }
             var fields: [(String, String)] = [
-                ("d", jsonString(full.string(from: r.date))),
+                ("d", jsonString(local.stamp(r.date))),
                 ("s", jsonString(aliases[r.speaker] ?? r.speaker)),
                 ("m", jsonString(body)),
             ]

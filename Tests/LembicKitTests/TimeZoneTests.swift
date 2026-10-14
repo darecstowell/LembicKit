@@ -58,3 +58,32 @@ struct TimeZoneTests {
             ).isEmpty)
     }
 }
+
+@Suite("local clock")
+struct LocalClockTests {
+    @Test func matchesDateFormatterAcrossZones() {
+        let dates =
+            stride(from: 978_307_200.0, to: 1_900_000_000, by: 7_777_777.0).map {
+                Date(timeIntervalSince1970: $0)
+            } + [Date(timeIntervalSince1970: 1_700_000_000.6)]
+        for id in ["America/Chicago", "Asia/Kolkata", "Australia/Lord_Howe", "UTC"] {
+            let zone = TimeZone(identifier: id)!
+            let clock = Transcript.LocalClock(timeZone: zone)
+            for date in dates {
+                #expect(
+                    clock.day(date)
+                        == Transcript.formatter("yyyy-MM-dd", timeZone: zone).string(from: date))
+                #expect(
+                    clock.weekday(date)
+                        == Transcript.formatter("EEE", timeZone: zone).string(from: date))
+                #expect(
+                    clock.time(date)
+                        == Transcript.formatter("HH:mm", timeZone: zone).string(from: date))
+                #expect(
+                    clock.stamp(date)
+                        == Transcript.formatter("yyyy-MM-dd'T'HH:mm:ssxxx", timeZone: zone).string(
+                            from: date))
+            }
+        }
+    }
+}
