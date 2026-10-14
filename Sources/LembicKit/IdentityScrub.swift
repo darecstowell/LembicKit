@@ -1,24 +1,28 @@
 import Foundation
 
-/// Carries the enabled scrubbers past the message bodies: the header identifier,
-/// the group name, the roster, speaker labels, reaction authors, and event lines.
-/// A label that is an identifier becomes a neutral `Member N`.
+/// Carries the enabled scrubbers and detectors past the message bodies: the header
+/// identifier, the group name, the roster, speaker labels, reaction authors, and event
+/// lines. A detector hit there has no message to flag, so it reads `[redacted]`.
+/// A label that is an identifier or holds a secret becomes a neutral `Member N`.
 struct IdentityScrub: Sendable {
     let categories: Set<ScrubberCategory>
+    let detectors: Set<SecretCategory>
     private let labelMap: [String: String]
 
-    init(categories: Set<ScrubberCategory>, labels: [String]) {
+    init(categories: Set<ScrubberCategory>, detectors: Set<SecretCategory> = [], labels: [String]) {
         self.categories = categories
+        self.detectors = detectors
         var map: [String: String] = [:]
-        guard !categories.isEmpty else {
+        guard !categories.isEmpty || !detectors.isEmpty else {
             labelMap = map
             return
         }
         let taken = Set(labels)
         var next = 1
-        for label in labels where map[label] == nil {
+        var seen: Set<String> = []
+        for label in labels where seen.insert(label).inserted {
             guard label != Transcript.meLabel, label != "Them",
-                Self.isIdentifier(label, categories)
+                Self.isIdentifier(label, categories) || !Self.secrets(label, detectors).isEmpty
             else { continue }
             while taken.contains("Member \(next)") { next += 1 }
             map[label] = "Member \(next)"
@@ -30,21 +34,25 @@ struct IdentityScrub: Sendable {
     /// Speakers and reaction authors by first appearance, then the rest of the
     /// roster, so every output format numbers `Member N` the same way.
     init(
-        categories: Set<ScrubberCategory>, records: [MessageRecord],
-        group: Transcript.GroupRenderInfo? = nil
+        categories: Set<ScrubberCategory>, detectors: Set<SecretCategory> = [],
+        records: [MessageRecord], group: Transcript.GroupRenderInfo? = nil
     ) {
         var labels: [String] = []
-        if !categories.isEmpty {
+        if !categories.isEmpty || !detectors.isEmpty {
             for r in records {
                 labels.append(r.speaker)
                 labels.append(contentsOf: r.reactions.map(\.by))
             }
             labels.append(contentsOf: group?.participantLabels ?? [])
         }
-        self.init(categories: categories, labels: labels)
+        self.init(categories: categories, detectors: detectors, labels: labels)
     }
 
-    var isActive: Bool { !categories.isEmpty }
+    var isActive: Bool { !categories.isEmpty || !detectors.isEmpty }
+
+    static func secrets(_ s: String, _ detectors: Set<SecretCategory>) -> [Range<Int>] {
+        detectors.isEmpty ? [] : SecretDetector.ranges(in: s, enabled: detectors)
+    }
 
     static func isIdentifier(_ s: String, _ categories: Set<ScrubberCategory>) -> Bool {
         if categories.contains(.phone), !s.contains(where: \.isLetter),
@@ -60,7 +68,9 @@ struct IdentityScrub: Sendable {
 
     /// The header identifier reads `[redacted]` when it holds anything a scrubber removes.
     func identifier(_ s: String) -> String {
-        isActive && Self.isIdentifier(s, categories) ? "[redacted]" : s
+        guard isActive else { return s }
+        if !categories.isEmpty, Self.isIdentifier(s, categories) { return "[redacted]" }
+        return text(s)
     }
 
     /// Free text: known identifier labels become their neutral label, then every
@@ -73,7 +83,7 @@ struct IdentityScrub: Sendable {
         }
         let ns = out as NSString
         let reps = Transcript.mergedRedactionSubstitutions(
-            SecretScrubber.ranges(in: ns, categories: categories))
+            SecretScrubber.ranges(in: ns, categories: categories) + Self.secrets(out, detectors))
         return Transcript.applyReplacements(to: ns, reps)
     }
 

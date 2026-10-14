@@ -383,7 +383,8 @@ extension Export {
     /// when a scrubber is on (the same labels `render` shows).
     static func identityScrubbed(_ records: [MessageRecord], scope: inout Scope) -> [MessageRecord]
     {
-        let identity = IdentityScrub(categories: scope.enabledScrubbers, records: records)
+        let identity = IdentityScrub(
+            categories: scope.enabledScrubbers, detectors: scope.enabledDetectors, records: records)
         scope.knownNames = identity.knownNames(scope.knownNames)
         return identity.records(records)
     }
@@ -530,7 +531,8 @@ extension Export {
 
         // Enabled scrubbers also reach the header, roster, labels, and events.
         let identity = IdentityScrub(
-            categories: scope.enabledScrubbers, records: filtered, group: group)
+            categories: scope.enabledScrubbers, detectors: scope.enabledDetectors,
+            records: filtered, group: group)
         let shown = identity.records(filtered)
         let knownNames = identity.knownNames(scope.knownNames)
 

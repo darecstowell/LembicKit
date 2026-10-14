@@ -291,4 +291,29 @@ struct RedactionLeakTests {
         #expect(txt.contains("Reacted \u{1F511} to \"the gate code is [redacted]\""))
         #expect(txt.contains("Loved \u{201C}see you soon\u{201D}"))
     }
+
+    @Test("F27: a secret in the group name, a rename event, or a label is redacted")
+    func nonBodySecrets() {
+        let secret = "Hunter2" + "!x"
+        let group = Transcript.GroupRenderInfo(
+            name: "Lake house wifi pw " + secret, participantLabels: ["Alice", "pw " + secret])
+        let events = [
+            Transcript.SystemEvent(
+                date: Fixtures.t0, line: "Alice named the group \"wifi pw \(secret)\"")
+        ]
+        let records = [
+            Fixtures.exportRec(1, "Alice", "hi all"), Fixtures.exportRec(2, "pw " + secret, "hey"),
+        ]
+        let out = Export.render(
+            records: records, number: "chat123", scope: Export.Scope(showSystemEvents: true),
+            group: group, systemEvents: events)
+        let txt = out.txt ?? ""
+        #expect(!txt.contains(secret), "\(txt)")
+        #expect(txt.contains("Member 1"), "a label that holds a secret becomes a neutral label")
+        let off = Export.render(
+            records: records, number: "chat123",
+            scope: Export.Scope(showSystemEvents: true, enabledDetectors: []), group: group,
+            systemEvents: events)
+        #expect(off.txt?.contains(secret) == true, "with every detector off, nothing changes")
+    }
 }
