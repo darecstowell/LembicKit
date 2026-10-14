@@ -20,6 +20,9 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Added
 
+- `ChatDatabase.changeToken()`: moves on any commit (an edit, an unsend, or a
+  delete, not only a new row), so a live view can refresh. `messageWatermark()`
+  still works but misses changes that add no row (lembickit.md F20).
 - `Conversations.personKeys(handleLabels:personCentricIDs:contactIDs:)`,
   `ChatDatabase.personCentricIDs()`, and `ChatDatabase.groupChatLinks()` (reads
   `chat_lookup` on macOS 26 when present).

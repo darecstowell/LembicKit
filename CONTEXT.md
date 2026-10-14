@@ -102,9 +102,9 @@ Two lists are the contract, declared as `(table, columns)` pairs. `ChatDatabase.
 
 `schemaProblems()` returns every missing core table or column. `preflight()` throws `UnsupportedSchemaError` when any are missing. Unknown `chat.style` values and an empty store are valid (a fresh install has no chats yet) and are not reported here. `missingOptionalColumns()` lists the optional gaps; they never block an export.
 
-### Copy-then-read
+### Read in place
 
-`ChatDatabase(copying:)` copies `chat.db` and its `-wal`/`-shm` sidecars to a private temp directory and opens the copy read-only, so the engine never holds even a read lock on the live Messages store. Connection lifecycle: `cleanUp()` drops the SQLite connection before deleting the temp files (removing them while GRDB holds them open trips SQLite's "vnode unlinked while in use" guard). `cleanUp()` is idempotent and also runs from `deinit`. `ChatDatabase` is `@unchecked Sendable` so a caller can copy the DB once and reuse the instance across the conversation list and every render (the underlying `DatabaseQueue` is thread-safe for concurrent reads). `Export` owns this handle for the same reason.
+`ChatDatabase(at:)` opens `chat.db` read-only, in place, and reads the live WAL; nothing is copied and nothing is written. `cleanUp()` drops the connection; it is idempotent and also runs from `deinit`. `ChatDatabase` is `@unchecked Sendable` so a caller can open the DB once and reuse the instance across the conversation list and every render (the underlying `DatabaseQueue` is thread-safe for concurrent reads). `Export` owns this handle for the same reason. To refresh an open thread, poll `changeToken()`: it moves on any commit (`PRAGMA data_version` on this connection plus `MAX(ROWID)`), so edits, unsends, and deletions are seen, not only new rows.
 
 ### Detectors flag, scrubbers remove
 

@@ -87,6 +87,23 @@ public final class ChatDatabase: @unchecked Sendable {
         try read { try Int64.fetchOne($0, sql: "SELECT MAX(ROWID) FROM message") ?? 0 }
     }
 
+    /// Changes when Messages commits anything: a new row, an edit, an unsend, or a
+    /// delete. Poll it to refresh an open thread. Compare tokens from one
+    /// `ChatDatabase` only: `dataVersion` is per connection.
+    public struct ChangeToken: Hashable, Sendable {
+        public let messageWatermark: Int64
+        public let dataVersion: Int64
+    }
+
+    public func changeToken() throws -> ChangeToken {
+        try read { db in
+            ChangeToken(
+                messageWatermark: try Int64.fetchOne(db, sql: "SELECT MAX(ROWID) FROM message")
+                    ?? 0,
+                dataVersion: try Int64.fetchOne(db, sql: "PRAGMA data_version") ?? 0)
+        }
+    }
+
     /// The oldest and newest real message timestamps in `message`, as Dates, or
     /// nils when the table is empty. Used to detect an incomplete (sparse) local
     /// store — a Mac whose Messages-in-iCloud history hasn't synced has a recent
