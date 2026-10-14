@@ -215,11 +215,9 @@ public struct Extractor: Sendable {
     /// its attachments once per chat, so links are de-duped by maj.ROWID — a
     /// no-op for a single chat, so the byte-validated path stays identical.
     func loadAttachments(
-        _ db: GRDB.Database, chatIDs: [Int64], schema cols: SchemaColumns
+        _ db: GRDB.Database, chatIDs: [Int64], schema cols: SchemaSnapshot
     ) throws -> [Int64: [AttachmentInfo]] {
-        guard !chatIDs.isEmpty,
-            cols.has("message_attachment_join", "message_id"),
-            cols.has("message_attachment_join", "attachment_id"),
+        guard !chatIDs.isEmpty, cols.has(ChatDatabase.attachmentLinkColumns),
             cols.hasTable("attachment")
         else { return [:] }
         var map: [Int64: [AttachmentInfo]] = [:]
@@ -516,7 +514,7 @@ public struct Extractor: Sendable {
     public func extract(_ db: GRDB.Database, chatIDs: Set<Int64>) throws -> Extraction {
         let ids = chatIDs.sorted()
         guard !ids.isEmpty else { return Extraction(records: [], skipped: []) }
-        let cols = try SchemaColumns.load(db)
+        let cols = try SchemaSnapshot.load(db)
         let attachmentMap = try loadAttachments(db, chatIDs: ids, schema: cols)
         func m(_ column: String) -> String { cols.column("m", "message", column) }
 
@@ -754,11 +752,8 @@ public struct Extractor: Sendable {
 
         // Probe the opt-in-only columns before preparing the SQL: a missing one
         // would throw at prepare time, so degrade to an empty stream instead.
-        guard
-            try ChatDatabase.hasColumns(
-                ["item_type", "group_action_type", "group_title", "other_handle"],
-                inTable: "message", db: db)
-        else {
+        let columns = ChatDatabase.systemEventColumns
+        guard try SchemaSnapshot.load(db, tables: [columns.table]).has(columns) else {
             Self.log.notice("system events: message table lacks the event columns, yielding none")
             return []
         }

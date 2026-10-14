@@ -48,6 +48,20 @@ public final class ChatDatabase: @unchecked Sendable {
         try Self.withRetry { try queue.read(block) }
     }
 
+    /// A read that hands the block a schema snapshot: `schema` when the caller
+    /// already loaded one for this session, else a fresh probe of `tables`.
+    func read<T>(
+        schema: SchemaSnapshot?, tables: [String] = SchemaSnapshot.allTables,
+        _ block: (GRDB.Database, SchemaSnapshot) throws -> T
+    ) throws -> T {
+        try read { db in try block(db, schema ?? SchemaSnapshot.load(db, tables: tables)) }
+    }
+
+    /// One probe of every table the engine reads, to share across a session's queries.
+    func schemaSnapshot() throws -> SchemaSnapshot {
+        try read { try SchemaSnapshot.load($0) }
+    }
+
     /// Run `op` up to `attempts` times, sleeping `backoff` between tries, but only
     /// retrying on a *transient* SQLite error (`isTransient`); any other error
     /// rethrows immediately. Factored out so the retry policy is unit-testable
@@ -158,8 +172,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// chat rows); this gathers them all so an export drops none.
     public func oneToOneChats(forHandles handles: Set<Int64>) throws -> [ChatInfo] {
         guard !handles.isEmpty else { return [] }
-        return try read { db in
-            let cols = try SchemaColumns.load(db)
+        return try read(schema: nil) { db, cols in
             let placeholders = Array(repeating: "?", count: handles.count).joined(separator: ",")
             let rows = try Row.fetchAll(
                 db,
@@ -233,8 +246,11 @@ public final class ChatDatabase: @unchecked Sendable {
     /// Contact grouping + multi-identifier union happen in the caller (they need the
     /// runtime Contacts map).
     public func conversationSummaries() throws -> [ConversationSummary] {
-        try read { db in
-            let cols = try SchemaColumns.load(db)
+        try conversationSummaries(schema: nil)
+    }
+
+    func conversationSummaries(schema: SchemaSnapshot?) throws -> [ConversationSummary] {
+        try read(schema: schema) { db, cols in
             let handleJoin =
                 cols.has("handle", "id") ? "LEFT JOIN handle h ON h.ROWID = chj.handle_id" : ""
             let rows = try Row.fetchAll(
@@ -326,7 +342,13 @@ public final class ChatDatabase: @unchecked Sendable {
     /// label resolution happen in `Conversations.group` (they need the runtime
     /// Contacts map), keeping this a pure read like its 1:1 twin.
     public func groupConversationSummaries() throws -> [GroupConversationSummary] {
-        try read { db in
+        try groupConversationSummaries(schema: nil)
+    }
+
+    func groupConversationSummaries(schema: SchemaSnapshot?) throws
+        -> [GroupConversationSummary]
+    {
+        try read(schema: schema) { db, cols in
             // Rosters keyed by chat_id (one chat → many handles). A separate read
             // from the count/date aggregate below so the GROUP BY on the message
             // join doesn't fan out per participant.
@@ -345,7 +367,6 @@ public final class ChatDatabase: @unchecked Sendable {
                 if let hid { rosters[cid, default: []].append(hid) }
             }
 
-            let cols = try SchemaColumns.load(db)
             let rows = try Row.fetchAll(
                 db,
                 sql: """
@@ -387,9 +408,12 @@ public final class ChatDatabase: @unchecked Sendable {
     /// Handle ROWID to `handle.person_centric_id`: Apple's link between the
     /// handles of one person. Empty when the column is missing.
     public func personCentricIDs() throws -> [Int64: String] {
-        try read { db in
-            let cols = try SchemaColumns.load(db, tables: ["handle"])
-            guard cols.has("handle", "person_centric_id") else { return [:] }
+        try personCentricIDs(schema: nil)
+    }
+
+    func personCentricIDs(schema: SchemaSnapshot?) throws -> [Int64: String] {
+        try read(schema: schema, tables: [Self.personLinkColumns.table]) { db, cols in
+            guard cols.has(Self.personLinkColumns) else { return [:] }
             var map: [Int64: String] = [:]
             let rows = try Row.fetchCursor(
                 db,
@@ -406,11 +430,12 @@ public final class ChatDatabase: @unchecked Sendable {
     /// that share one are the same thread split across services. Empty when the
     /// table is missing.
     public func groupChatLinks() throws -> [Int64: Set<String>] {
-        try read { db in
-            let cols = try SchemaColumns.load(db, tables: ["chat_lookup"])
-            guard cols.has("chat_lookup", "chat"), cols.has("chat_lookup", "identifier") else {
-                return [:]
-            }
+        try groupChatLinks(schema: nil)
+    }
+
+    func groupChatLinks(schema: SchemaSnapshot?) throws -> [Int64: Set<String>] {
+        try read(schema: schema, tables: [Self.chatLinkColumns.table]) { db, cols in
+            guard cols.has(Self.chatLinkColumns) else { return [:] }
             var links: [Int64: Set<String>] = [:]
             let rows = try Row.fetchCursor(
                 db,
@@ -438,8 +463,11 @@ public final class ChatDatabase: @unchecked Sendable {
     /// (`other_handle`) who never wrote has a count of 0, so former members who
     /// stayed silent still reach the roster.
     public func groupParticipantMessageCounts() throws -> [Int64: [Int64: Int]] {
-        try read { db in
-            let cols = try SchemaColumns.load(db)
+        try groupParticipantMessageCounts(schema: nil)
+    }
+
+    func groupParticipantMessageCounts(schema: SchemaSnapshot?) throws -> [Int64: [Int64: Int]] {
+        try read(schema: schema) { db, cols in
             let itemType = "COALESCE(\(cols.column("m", "message", "item_type")), 0)"
             let other = "COALESCE(\(cols.column("m", "message", "other_handle")), 0)"
             var counts: [Int64: [Int64: Int]] = [:]
@@ -471,14 +499,14 @@ public final class ChatDatabase: @unchecked Sendable {
     // fast with Apple's indexes or none; the planner otherwise may scan every join row.
 
     /// SQL that keeps real messages only: no system rows, no reactions.
-    static func realMessageFilter(_ cols: SchemaColumns) -> String {
+    static func realMessageFilter(_ cols: SchemaSnapshot) -> String {
         "COALESCE(\(cols.column("m", "message", "item_type")), 0) = 0"
             + " AND COALESCE(\(cols.column("m", "message", "associated_message_type")), 0) = 0"
     }
 
     /// The distinct `destination_caller_id` values of the owner's messages, as one
     /// comma-joined string per group.
-    static func ownerAddresses(_ cols: SchemaColumns) -> String {
+    static func ownerAddresses(_ cols: SchemaSnapshot) -> String {
         let caller = cols.column("m", "message", "destination_caller_id")
         return "GROUP_CONCAT(DISTINCT CASE WHEN m.is_from_me = 1 THEN \(caller) END)"
     }
@@ -496,7 +524,7 @@ public final class ChatDatabase: @unchecked Sendable {
 
     /// `m.date`, or NULL for a Send Later row that has not gone out, so a future
     /// date never pins a conversation to the top.
-    static func sentDate(_ cols: SchemaColumns) -> String {
+    static func sentDate(_ cols: SchemaSnapshot) -> String {
         let type = cols.column("m", "message", "schedule_type")
         let sent = cols.column("m", "message", "is_sent")
         return "CASE WHEN \(type) = 2 AND COALESCE(\(sent), 0) = 0 THEN NULL"
@@ -546,13 +574,23 @@ public final class ChatDatabase: @unchecked Sendable {
         ("chat_lookup", ["chat", "identifier"]),
     ]
 
+    // Optional columns a feature needs all of; without one, the feature yields nothing.
+    static let systemEventColumns = (
+        table: "message",
+        columns: ["item_type", "group_action_type", "group_title", "other_handle"]
+    )
+    static let attachmentLinkColumns = (
+        table: "message_attachment_join", columns: ["message_id", "attachment_id"]
+    )
+    static let personLinkColumns = (table: "handle", columns: ["person_centric_id"])
+    static let chatLinkColumns = (table: "chat_lookup", columns: ["chat", "identifier"])
+
     /// Every missing core table or column. Empty means the engine can read the
     /// database. Unknown `chat.style` values and an empty store are valid, so
     /// neither is reported here.
     public func schemaProblems() throws -> [SchemaProblem] {
-        try read { db in
+        try read(schema: nil, tables: Self.requiredSchema.map(\.table)) { _, columns in
             var problems: [SchemaProblem] = []
-            let columns = try SchemaColumns.load(db, tables: Self.requiredSchema.map(\.table))
             for (table, required) in Self.requiredSchema {
                 guard columns.hasTable(table) else {
                     problems.append(SchemaProblem(table: table, column: nil))
@@ -576,8 +614,7 @@ public final class ChatDatabase: @unchecked Sendable {
     /// Every optional table or column the database lacks: the features that will
     /// degrade. For diagnostics only; `preflight()` never fails on these.
     public func missingOptionalColumns() throws -> [SchemaProblem] {
-        try read { db in
-            let columns = try SchemaColumns.load(db, tables: Self.optionalSchema.map(\.table))
+        try read(schema: nil, tables: Self.optionalSchema.map(\.table)) { _, columns in
             var gaps: [SchemaProblem] = []
             for (table, optional) in Self.optionalSchema {
                 guard columns.hasTable(table) else {
@@ -600,38 +637,22 @@ public final class ChatDatabase: @unchecked Sendable {
         if !problems.isEmpty { throw UnsupportedSchemaError(problems: problems) }
     }
 
-    /// Whether `table` carries **every** column in `columns` (case-insensitive),
-    /// via the same `PRAGMA table_info` introspection `schemaProblems` uses. The
-    /// opt-in seams that read columns *outside* `requiredSchema` (the group
-    /// system-event stream's `group_action_type`/`group_title`/`other_handle`)
-    /// probe with this before preparing their SQL, so a missing column degrades
-    /// gracefully (the toggle yields nothing) rather than throwing at
-    /// statement-prepare time. A missing table yields an empty result set ⇒ false.
+    /// Whether `table` carries every column in `columns` (case-insensitive), by the
+    /// same `PRAGMA table_info` probe the queries use. A missing table is false.
     public func hasColumns(_ columns: [String], inTable table: String) throws -> Bool {
-        try read { try Self.hasColumns(columns, inTable: table, db: $0) }
-    }
-
-    /// The `PRAGMA table_info` column probe, on an already-open `GRDB.Database` —
-    /// the shared core of `hasColumns(_:inTable:)` and the reuse seam for callers
-    /// that already hold a read connection (e.g. `Extractor.extractSystemEvents`,
-    /// which probes inside its own `queue.read` before preparing its SQL).
-    static func hasColumns(_ columns: [String], inTable table: String, db: GRDB.Database) throws
-        -> Bool
-    {
-        let schema = try SchemaColumns.load(db, tables: [table])
-        return columns.allSatisfy { schema.has(table, $0) }
+        try read(schema: nil, tables: [table]) { _, schema in schema.has((table, columns)) }
     }
 }
 
-/// The columns a database actually has, read once per query with `PRAGMA
-/// table_info`. Lets each query select `NULL` in place of an absent optional column.
-struct SchemaColumns: Sendable {
+/// The columns a database actually has, read with `PRAGMA table_info` once per read
+/// session. Lets each query select `NULL` in place of an absent optional column.
+struct SchemaSnapshot: Sendable {
     private var tables: [String: Set<String>] = [:]
 
     /// `tables` are chat.db table-name constants from the engine, never user input,
     /// so interpolating them into PRAGMA (which cannot bind an identifier) is safe.
-    static func load(_ db: GRDB.Database, tables names: [String]) throws -> SchemaColumns {
-        var schema = SchemaColumns()
+    static func load(_ db: GRDB.Database, tables names: [String]) throws -> SchemaSnapshot {
+        var schema = SchemaSnapshot()
         for name in Set(names) {
             let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(\(name))")
                 .map { ($0["name"] as String).lowercased() }
@@ -640,20 +661,23 @@ struct SchemaColumns: Sendable {
         return schema
     }
 
-    /// Every table the engine's SQL can touch.
-    static let engineTables = [
-        "handle", "chat", "chat_handle_join", "chat_message_join", "message",
-        "message_attachment_join", "attachment",
-    ]
+    /// Every table in the schema contract.
+    static let allTables = Array(
+        Set(ChatDatabase.requiredSchema.map(\.table) + ChatDatabase.optionalSchema.map(\.table))
+    ).sorted()
 
-    static func load(_ db: GRDB.Database) throws -> SchemaColumns {
-        try load(db, tables: engineTables)
+    static func load(_ db: GRDB.Database) throws -> SchemaSnapshot {
+        try load(db, tables: allTables)
     }
 
     func hasTable(_ table: String) -> Bool { tables[table.lowercased()] != nil }
 
     func has(_ table: String, _ column: String) -> Bool {
         tables[table.lowercased()]?.contains(column.lowercased()) ?? false
+    }
+
+    func has(_ set: (table: String, columns: [String])) -> Bool {
+        set.columns.allSatisfy { has(set.table, $0) }
     }
 
     /// `alias.column` when the column exists, else `NULL`.

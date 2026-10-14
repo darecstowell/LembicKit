@@ -216,7 +216,8 @@ public enum Conversations {
         stitch: GroupStitch = .exact,
         region: String = ContactsMap.currentRegion()
     ) throws -> [Conversation] {
-        let summaries = try db.conversationSummaries()
+        let schema = try db.schemaSnapshot()
+        let summaries = try db.conversationSummaries(schema: schema)
         var names: [String: String]
         var cards = contactIDs ?? [:]
         var owner = ownerIdentifiers
@@ -248,7 +249,7 @@ public enum Conversations {
                 + summaries.compactMap(\.identifier).map {
                     ContactsMap.normalizeHandle($0, defaultRegion: region)
                 })
-        let groupSummaries = try db.groupConversationSummaries()
+        let groupSummaries = try db.groupConversationSummaries(schema: schema)
         owner.formUnion(
             ownerAddresses(
                 seen: summaries.map(\.ownerIdentifiers) + groupSummaries.map(\.ownerIdentifiers),
@@ -263,14 +264,14 @@ public enum Conversations {
         // `participantCounts` (one grouped query, this session) orders each
         // roster most-active-first — summed across a fork's chatIDs
         // in memory, never per row.
-        let participantCounts = try db.groupParticipantMessageCounts()
+        let participantCounts = try db.groupParticipantMessageCounts(schema: schema)
         let people = personKeys(
-            handleLabels: handleLabels, personCentricIDs: try db.personCentricIDs(),
+            handleLabels: handleLabels, personCentricIDs: try db.personCentricIDs(schema: schema),
             contactIDs: cards, region: region)
         var groups = groupGroups(
             groupSummaries, handleLabels: handleLabels, names: names,
             participantCounts: participantCounts, personKeys: people,
-            chatLinks: try db.groupChatLinks(), owner: owner, region: region)
+            chatLinks: try db.groupChatLinks(schema: schema), owner: owner, region: region)
 
         // The opt-in fuzzy merge: a conservative second pass that merges exact-set
         // groups representing the same group with changed membership. `.exact` (the
