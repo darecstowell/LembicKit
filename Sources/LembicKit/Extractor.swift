@@ -25,6 +25,10 @@ public struct MessageRecord: Sendable {
         public static let unreadable = Flags(rawValue: 1 << 1)
         /// An `item_type` the engine does not know. The text ends with a marker.
         public static let unknownType = Flags(rawValue: 1 << 2)
+        /// A message the owner sent that failed (`error` is not 0).
+        public static let notDelivered = Flags(rawValue: 1 << 3)
+        /// A Send Later message that has not gone out yet.
+        public static let scheduled = Flags(rawValue: 1 << 4)
     }
 
     /// Public memberwise initializer over every stored property. The extractor
@@ -278,6 +282,13 @@ public struct Extractor: Sendable {
     static let unreadableMarker = "[message could not be read]"
     static let incompleteMarker = "[message may be incomplete]"
     static let unknownTypeMarker = "[unknown message type]"
+    static let notDeliveredMarker = "[not delivered]"
+    static let scheduledMarker = "[scheduled, not sent]"
+
+    /// A Send Later row (`schedule_type` 2) that has not been sent.
+    static func isPendingScheduled(scheduleType: Int64?, isSent: Int64?) -> Bool {
+        scheduleType == 2 && (isSent ?? 0) == 0
+    }
 
     /// The body text and per-U+FFFC attributes. `attributedBody` wins when it
     /// decodes; otherwise the text column or a salvaged prefix is used and flagged.
@@ -386,7 +397,9 @@ public struct Extractor: Sendable {
                        \(m("associated_message_type")) amt, \(m("associated_message_guid")) amg,
                        \(m("associated_message_emoji")) ame,
                        \(m("balloon_bundle_id")) balloon_bundle_id,
-                       \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data
+                       \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data,
+                       \(m("error")) error, \(m("is_sent")) is_sent,
+                       \(m("schedule_type")) schedule_type
                 FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
                 WHERE cmj.chat_id IN (\(placeholders))
                 ORDER BY m.date, m.ROWID
@@ -473,6 +486,16 @@ public struct Extractor: Sendable {
             if text.isEmpty {
                 skipped.append(SkippedMessage(date: date, reason: .emptyBody))
                 continue
+            }
+            if isFromMe, (row["error"] as Int64? ?? 0) != 0 {
+                text += " " + Self.notDeliveredMarker
+                flags.insert(.notDelivered)
+            } else if isFromMe,
+                Self.isPendingScheduled(
+                    scheduleType: row["schedule_type"], isSent: row["is_sent"])
+            {
+                text += " " + Self.scheduledMarker
+                flags.insert(.scheduled)
             }
 
             let guid: String? = row["guid"]

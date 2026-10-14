@@ -31,6 +31,12 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Failed sends and pending Send Later messages no longer read as sent. A message
+  the owner sent with a non-zero `error` ends with `[not delivered]`, and a Send
+  Later message that has not gone out (`schedule_type` 2, `is_sent` 0) ends with
+  `[scheduled, not sent]`. `MessageRecord.flags` marks both. A pending Send
+  Later date no longer pins its conversation to the top of the list
+  (lembickit.md F13, redaction.md F32).
 - Messages no longer drop silently, and a body that does not decode is never
   shown as a normal message. A damaged `attributedBody` is salvaged up to the
   first missing byte, or the `text` column is used, and the line ends with

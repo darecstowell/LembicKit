@@ -228,7 +228,8 @@ public final class ChatDatabase: @unchecked Sendable {
                                     \(cols.column("h", "handle", "id"))) ident,
                            \(cols.column("c", "chat", "service_name")) svc,
                            \(cols.column("c", "chat", "guid")) cguid,
-                           chj.handle_id hid, MAX(m.date) lastDate, COUNT(*) cnt
+                           chj.handle_id hid, MAX(\(Self.sentDate(cols))) lastDate,
+                           COUNT(*) cnt
                     FROM chat c
                     JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
                     \(handleJoin)
@@ -332,7 +333,7 @@ public final class ChatDatabase: @unchecked Sendable {
                            \(cols.column("c", "chat", "guid")) cguid,
                            \(cols.column("c", "chat", "group_id")) gid,
                            MIN(CASE WHEN m.date > 0 THEN m.date END) firstDate,
-                           MAX(m.date) lastDate, COUNT(*) cnt
+                           MAX(\(Self.sentDate(cols))) lastDate, COUNT(*) cnt
                     FROM chat c
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
@@ -444,6 +445,14 @@ public final class ChatDatabase: @unchecked Sendable {
         }
     }
 
+    /// `m.date`, or NULL for a Send Later row that has not gone out, so a future
+    /// date never pins a conversation to the top.
+    static func sentDate(_ cols: SchemaColumns) -> String {
+        let type = cols.column("m", "message", "schedule_type")
+        let sent = cols.column("m", "message", "is_sent")
+        return "CASE WHEN \(type) = 2 AND COALESCE(\(sent), 0) = 0 THEN NULL ELSE m.date END"
+    }
+
     /// SQL that keeps real messages only: no system rows, no reactions.
     static func realMessageFilter(_ cols: SchemaColumns) -> String {
         "COALESCE(\(cols.column("m", "message", "item_type")), 0) = 0"
@@ -478,7 +487,7 @@ public final class ChatDatabase: @unchecked Sendable {
                 "service", "text", "attributedBody", "item_type", "associated_message_type",
                 "associated_message_guid", "associated_message_emoji", "balloon_bundle_id",
                 "date_retracted", "payload_data", "group_action_type", "group_title",
-                "other_handle",
+                "other_handle", "error", "is_sent", "schedule_type",
             ]
         ),
         ("message_attachment_join", ["message_id", "attachment_id"]),
