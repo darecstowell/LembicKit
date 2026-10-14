@@ -47,6 +47,55 @@ public enum AttributedBody {
         return Body(text: text, objects: objects)
     }
 
+    /// The string from a blob the decoder rejects: the bytes after the first
+    /// `NSString` class, clamped to the blob and cut at the first invalid UTF-8.
+    /// `isComplete` is false when bytes the blob declares are missing.
+    static func salvage(_ data: Data) -> (text: String, isComplete: Bool)? {
+        let bytes = [UInt8](data)
+        let marker = Array("NSString".utf8)
+        guard bytes.count > marker.count,
+            let classStart = (0...(bytes.count - marker.count)).first(where: {
+                bytes[$0..<($0 + marker.count)].elementsEqual(marker)
+            })
+        else { return nil }
+        let searchEnd = min(bytes.count, classStart + marker.count + 16)
+        guard let plus = bytes[(classStart + marker.count)..<searchEnd].firstIndex(of: 0x2B),
+            plus + 1 < bytes.count
+        else { return nil }
+        var start = plus + 2
+        let declared: Int
+        switch bytes[plus + 1] {
+        case 0x81:
+            guard plus + 3 < bytes.count else { return nil }
+            declared = Int(bytes[plus + 2]) | Int(bytes[plus + 3]) << 8
+            start = plus + 4
+        case 0x82:
+            guard plus + 5 < bytes.count else { return nil }
+            declared = (0..<4).reduce(0) { $0 | Int(bytes[plus + 2 + $1]) << (8 * $1) }
+            start = plus + 6
+        case let length where length < 0x80:
+            declared = Int(length)
+        default:
+            return nil
+        }
+        var iterator = bytes[start..<min(bytes.count, start + declared)].makeIterator()
+        var decoder = UTF8()
+        var scalars = String.UnicodeScalarView()
+        var consumed = 0
+        decoding: while true {
+            switch decoder.decode(&iterator) {
+            case .scalarValue(let scalar):
+                scalars.append(scalar)
+                consumed += UTF8.width(scalar)
+            case .emptyInput, .error:
+                break decoding
+            }
+        }
+        let text = String(scalars)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (text, consumed == declared)
+    }
+
     private static func bodyString(_ item: Archivable) -> String? {
         guard case .object(let cls, let objects) = item,
             cls.name == "NSString" || cls.name == "NSMutableString",

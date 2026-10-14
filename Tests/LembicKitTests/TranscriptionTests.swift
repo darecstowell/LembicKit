@@ -38,7 +38,7 @@ struct TranscriptionTests {
         let blob = TypedStreamFixture.body([
             ("\u{FFFC}", ["IMAudioTranscription": "This is\na test "])
         ])
-        let (text, hadAttachment) = Extractor.renderText(
+        let (text, hadAttachment, _) = Extractor.renderText(
             attributedBody: blob, fallbackText: nil, balloonBundleID: nil, attachments: [audio])
         #expect(text == "[audio: \"This is a test\"]")
         #expect(hadAttachment)
@@ -46,7 +46,7 @@ struct TranscriptionTests {
 
     @Test func audioWithoutTranscriptionStaysPlain() {
         let blob = TypedStreamFixture.body("\u{FFFC}")
-        let (text, _) = Extractor.renderText(
+        let (text, _, _) = Extractor.renderText(
             attributedBody: blob, fallbackText: nil, balloonBundleID: nil, attachments: [audio])
         #expect(text == "[audio]")
     }

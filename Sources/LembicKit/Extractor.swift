@@ -12,6 +12,20 @@ public struct MessageRecord: Sendable {
     public let text: String
     public let hadAttachment: Bool
     public var reactions: [Reaction]
+    /// What kept this row from reading as a normal message. Empty for most rows.
+    public var flags: Flags
+
+    public struct Flags: OptionSet, Sendable, Hashable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+
+        /// Part of the body could not be read. The text ends with a marker.
+        public static let incomplete = Flags(rawValue: 1 << 0)
+        /// No body could be read. The text is a marker only.
+        public static let unreadable = Flags(rawValue: 1 << 1)
+        /// An `item_type` the engine does not know. The text ends with a marker.
+        public static let unknownType = Flags(rawValue: 1 << 2)
+    }
 
     /// Public memberwise initializer over every stored property. The extractor
     /// builds records from `chat.db` rows, but a public init also lets callers
@@ -25,7 +39,8 @@ public struct MessageRecord: Sendable {
         service: String?,
         text: String,
         hadAttachment: Bool,
-        reactions: [Reaction]
+        reactions: [Reaction],
+        flags: Flags = []
     ) {
         self.guid = guid
         self.date = date
@@ -35,7 +50,36 @@ public struct MessageRecord: Sendable {
         self.text = text
         self.hadAttachment = hadAttachment
         self.reactions = reactions
+        self.flags = flags
     }
+}
+
+/// A row the extractor read but did not emit, so callers can count what is missing.
+public struct SkippedMessage: Sendable, Equatable {
+    public enum Reason: String, Sendable {
+        /// No text, attachment, or app content.
+        case emptyBody
+        /// An `item_type` the engine does not know, with no text.
+        case unknownType
+        /// An `associated_message_type` the engine does not know.
+        case unknownReaction
+        /// A `date` the engine cannot read (zero, negative, or missing).
+        case invalidDate
+    }
+
+    public let date: Date?
+    public let reason: Reason
+
+    public init(date: Date?, reason: Reason) {
+        self.date = date
+        self.reason = reason
+    }
+}
+
+/// One conversation's messages and the rows that were not shown.
+public struct Extraction: Sendable {
+    public var records: [MessageRecord]
+    public var skipped: [SkippedMessage]
 }
 
 public struct Extractor: Sendable {
@@ -179,16 +223,16 @@ public struct Extractor: Sendable {
     }
 
     /// Decoded text with attachment placeholders spliced in at U+FFFC marks.
+    /// A body that does not decode cleanly is marked in the text and in `flags`.
     static func renderText(
         attributedBody: Data?,
         fallbackText: String?,
         balloonBundleID: String?,
         attachments: [AttachmentInfo],
         payload: Data? = nil
-    ) -> (text: String, hadAttachment: Bool) {
-        let body = attributedBody.flatMap(AttributedBody.parse)
-        let raw = body?.text ?? fallbackText ?? ""
-        let objects = body?.objects ?? []
+    ) -> (text: String, hadAttachment: Bool, flags: MessageRecord.Flags) {
+        let (raw, objects, flags) = readBody(attributedBody, fallbackText: fallbackText)
+        let isAppMessage = !(balloonBundleID ?? "").isEmpty
         let placeholders = attachments.map(\.placeholder)
         var hadAttachment = false
 
@@ -201,6 +245,8 @@ public struct Extractor: Sendable {
                 let words = transcription(objects[index][AttributedBody.audioTranscriptionKey])
             {
                 placeholder = "[audio: \"\(words)\"]"
+            } else if index >= placeholders.count, !isAppMessage {
+                placeholder = "[attachment]"
             }
             index += 1
             if let placeholder {
@@ -221,7 +267,34 @@ public struct Extractor: Sendable {
         {
             out = out.isEmpty ? token : out + " " + token
         }
-        return (out, hadAttachment)
+        if flags.contains(.unreadable) {
+            out = out.isEmpty ? unreadableMarker : out + " " + incompleteMarker
+        } else if flags.contains(.incomplete) {
+            out += " " + incompleteMarker
+        }
+        return (out, hadAttachment, flags)
+    }
+
+    static let unreadableMarker = "[message could not be read]"
+    static let incompleteMarker = "[message may be incomplete]"
+    static let unknownTypeMarker = "[unknown message type]"
+
+    /// The body text and per-U+FFFC attributes. `attributedBody` wins when it
+    /// decodes; otherwise the text column or a salvaged prefix is used and flagged.
+    static func readBody(_ blob: Data?, fallbackText: String?) -> (
+        text: String, objects: [[String: String]], flags: MessageRecord.Flags
+    ) {
+        let fallback = fallbackText ?? ""
+        guard let blob, !blob.isEmpty else { return (fallback, [], []) }
+        if let body = AttributedBody.parse(blob) {
+            if !body.text.isEmpty { return (body.text, body.objects, []) }
+            return (fallback, [], fallback.isEmpty ? [] : .incomplete)
+        }
+        let salvaged = AttributedBody.salvage(blob)
+        if let salvaged, salvaged.isComplete { return (salvaged.text, [], []) }
+        if !fallback.isEmpty { return (fallback, [], .incomplete) }
+        if let salvaged { return (salvaged.text, [], .incomplete) }
+        return ("", [], .unreadable)
     }
 
     /// A voice note's transcription on one line, or nil when there is none.
@@ -284,13 +357,19 @@ public struct Extractor: Sendable {
     public func extractConversation(_ db: GRDB.Database, chatIDs: Set<Int64>) throws
         -> [MessageRecord]
     {
+        try extract(db, chatIDs: chatIDs).records
+    }
+
+    /// `extractConversation` plus the rows it read but did not show.
+    public func extract(_ db: GRDB.Database, chatIDs: Set<Int64>) throws -> Extraction {
         let ids = chatIDs.sorted()
-        guard !ids.isEmpty else { return [] }
+        guard !ids.isEmpty else { return Extraction(records: [], skipped: []) }
         let cols = try SchemaColumns.load(db)
         let attachmentMap = try loadAttachments(db, chatIDs: ids, schema: cols)
         func m(_ column: String) -> String { cols.column("m", "message", column) }
 
         var emitted: [MessageRecord] = []
+        var skipped: [SkippedMessage] = []
         var indexByGUID: [String: Int] = [:]
         var rawReactions: [RawReaction] = []
         var seenROWIDs = Set<Int64>()
@@ -323,6 +402,12 @@ public struct Extractor: Sendable {
             let isFromMe = (row["is_from_me"] as Int64? ?? 0) != 0
             let handleID: Int64 = row["handle_id"] ?? 0
             let amt: Int64 = row["amt"] ?? 0
+            // Floor to whole seconds: chat.db dates carry sub-second precision,
+            // and DateFormatter rounds fractional seconds up while strftime
+            // (the Python reference) truncates them.
+            let date = Date(
+                timeIntervalSince1970: (Double(dateNS) / 1e9 + Self.appleEpochOffset).rounded(.down)
+            )
 
             let kind = Reactions.kind(of: amt)
             if kind != .message {
@@ -347,6 +432,7 @@ public struct Extractor: Sendable {
                     emoji = texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", ")
                 case .message, .unknown:
                     Self.log.notice("skipped a row with associated_message_type \(amt)")
+                    skipped.append(SkippedMessage(date: date, reason: .unknownReaction))
                     sequence += 1
                     continue
                 }
@@ -365,37 +451,45 @@ public struct Extractor: Sendable {
             }
             sequence += 1
 
-            if (row["item_type"] as Int64? ?? 0) != 0 { continue }  // system events
+            let itemType: Int64 = row["item_type"] ?? 0
+            if Self.systemItemTypes.contains(itemType) { continue }
             if (row["date_retracted"] as Int64? ?? 0) != 0 { continue }  // unsent
 
             let payload: Data? = row["payload_data"]
-            let (text, hadAttachment) = Self.renderText(
+            var (text, hadAttachment, flags) = Self.renderText(
                 attributedBody: row["attributedBody"],
                 fallbackText: row["text"],
                 balloonBundleID: row["balloon_bundle_id"],
                 attachments: attachmentMap[rowid] ?? [],
                 payload: payload)
-            if text.isEmpty { continue }
+            if itemType != 0 {
+                guard !text.isEmpty, text != Self.unreadableMarker else {
+                    skipped.append(SkippedMessage(date: date, reason: .unknownType))
+                    continue
+                }
+                text += " " + Self.unknownTypeMarker
+                flags.insert(.unknownType)
+            }
+            if text.isEmpty {
+                skipped.append(SkippedMessage(date: date, reason: .emptyBody))
+                continue
+            }
 
             let guid: String? = row["guid"]
             if let guid, let payload, let poll = AppMessage.poll(from: payload) {
                 pollOptions[guid] = Dictionary(
                     poll.options.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
             }
-            // Floor to whole seconds: chat.db dates carry sub-second precision,
-            // and DateFormatter rounds fractional seconds up while strftime
-            // (the Python reference) truncates them.
             let record = MessageRecord(
                 guid: guid,
-                date: Date(
-                    timeIntervalSince1970: (Double(dateNS) / 1e9 + Self.appleEpochOffset).rounded(
-                        .down)),
+                date: date,
                 speaker: label(isFromMe: isFromMe, handleID: handleID),
                 isTarget: !isFromMe && targetHandles.contains(handleID),
                 service: row["service"],
                 text: text,
                 hadAttachment: hadAttachment,
-                reactions: [])
+                reactions: [],
+                flags: flags)
             if let guid { indexByGUID[guid] = emitted.count }
             emitted.append(record)
         }
@@ -411,8 +505,11 @@ public struct Extractor: Sendable {
                     < (Reactions.displayRank($1.by), $1.by, $1.emoji)
             }
         }
-        return emitted
+        return Extraction(records: emitted, skipped: skipped)
     }
+
+    /// `item_type` values for group and system events, which the event stream reads.
+    static let systemItemTypes: Set<Int64> = [1, 2, 3, 4, 5, 6]
 
     /// The opt-in group **system-event** stream for a conversation — participant
     /// added/removed, group renamed, a member leaving.

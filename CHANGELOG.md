@@ -31,6 +31,17 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Messages no longer drop silently, and a body that does not decode is never
+  shown as a normal message. A damaged `attributedBody` is salvaged up to the
+  first missing byte, or the `text` column is used, and the line ends with
+  `[message may be incomplete]`. With nothing to read, the line is
+  `[message could not be read]`. An unknown `item_type` with text shows with
+  `[unknown message type]`, and only the known system types (1 to 6) are
+  skipped. A U+FFFC whose attachment row is gone shows `[attachment]`. The new
+  `MessageRecord.flags` marks these rows. Rows that are not shown are counted:
+  `Extractor.extract(_:chatIDs:)` returns them with the records, and
+  `Export.Rendered.skipped` lists the ones in scope (lembickit.md F12,
+  redaction.md F32).
 - Attachments get the right type. A sticker shows `[sticker]`, a Genmoji shows
   `[genmoji: pink poodle]`, a dropped pin (`public.vlocation`, `.loc.vcf`) shows
   `[location]` instead of `[contact]`, and an m4a voice memo (`audio/mp4`) shows
