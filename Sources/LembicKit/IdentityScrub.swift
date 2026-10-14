@@ -21,7 +21,7 @@ struct IdentityScrub: Sendable {
         var next = 1
         var seen: Set<String> = []
         for label in labels where seen.insert(label).inserted {
-            guard label != Transcript.meLabel, label != "Them",
+            guard label != Transcript.meLabel, label != Transcript.themLabel,
                 Self.isIdentifier(label, categories) || !Self.secrets(label, detectors).isEmpty
             else { continue }
             while taken.contains("Member \(next)") { next += 1 }

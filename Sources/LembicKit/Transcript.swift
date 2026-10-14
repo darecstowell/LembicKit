@@ -7,6 +7,8 @@ public enum Transcript {
     /// The renderer already hardcodes it in the legend; named here so the
     /// anonymization map can anchor the owner to Person 1.
     static let meLabel = "Me"
+    /// The other person's speaker label in a 1:1, set by `Extractor.label(isFromMe:…)`.
+    static let themLabel = "Them"
     public struct Stats: Sendable {
         public let messages: Int
         public let reactions: Int

@@ -197,7 +197,7 @@ extension Transcript {
             if let group, renderGroup {
                 reactor = group.participantLabels.first ?? "a member"
             } else {
-                reactor = anonymize ? "PN" : noteToSelf ? "Me" : "Them"
+                reactor = anonymize ? "PN" : noteToSelf ? meLabel : themLabel
             }
             out += "# Reactions shown as [\(reactor): ❤️] after the message they target.\n"
         }

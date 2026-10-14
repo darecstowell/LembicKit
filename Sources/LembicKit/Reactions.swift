@@ -113,6 +113,6 @@ enum Reactions {
 
     /// Display order within one message: Them, Me, then third parties.
     static func displayRank(_ by: String) -> Int {
-        by == "Them" ? 0 : by == "Me" ? 1 : 2
+        by == Transcript.themLabel ? 0 : by == Transcript.meLabel ? 1 : 2
     }
 }

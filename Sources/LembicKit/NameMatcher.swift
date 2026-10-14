@@ -66,7 +66,7 @@ struct NameMatcher: Sendable {
     /// True when a label is a name: not the owner label, not "Them", not a neutral
     /// `Member N`, and not a number (a label with no letter).
     static func isAliasableName(_ label: String) -> Bool {
-        if label == Transcript.meLabel || label == "Them" { return false }
+        if label == Transcript.meLabel || label == Transcript.themLabel { return false }
         if label.hasPrefix("Member "), Int(label.dropFirst(7)) != nil { return false }
         return label.contains { $0.isLetter }
     }
