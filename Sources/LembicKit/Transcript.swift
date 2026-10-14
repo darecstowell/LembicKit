@@ -467,18 +467,7 @@ public enum Transcript {
                     $0.lowerBound >= 0 && $0.upperBound <= sourceLen
                         && $0.lowerBound < $0.upperBound
                 }
-                .sorted { $0.lowerBound < $1.lowerBound }
-            for sp in clamped {
-                if let last = redactionReps.last, sp.lowerBound <= last.range.upperBound {
-                    let merged =
-                        last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
-                    redactionReps[redactionReps.count - 1] = BodySubstitution(
-                        range: merged, token: "[redacted]", isRedaction: true)
-                } else {
-                    redactionReps.append(
-                        BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
-                }
-            }
+            redactionReps = mergedRedactionSubstitutions(clamped)
         }
 
         // (b) In-body name-alias replacements (anonymize only; empty otherwise).
@@ -499,6 +488,21 @@ public enum Transcript {
         // (c) Unified, non-overlapping, ascending list. Redactions are placed first
         // so an alias that ties a redaction start is dropped.
         return dedupedReplacements(redactionReps + stripReps + aliasReps)
+    }
+
+    /// Overlapping or touching spans merged into one `[redacted]` substitution each.
+    static func mergedRedactionSubstitutions(_ spans: [Range<Int>]) -> [BodySubstitution] {
+        var out: [BodySubstitution] = []
+        for sp in spans.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = out.last, sp.lowerBound <= last.range.upperBound {
+                let merged = last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
+                out[out.count - 1] = BodySubstitution(
+                    range: merged, token: "[redacted]", isRedaction: true)
+            } else {
+                out.append(BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
+            }
+        }
+        return out
     }
 
     /// The fully-rendered body for ONE message — redaction spans spliced to

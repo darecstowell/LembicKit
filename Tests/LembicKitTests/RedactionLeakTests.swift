@@ -109,4 +109,81 @@ struct RedactionLeakTests {
                 Transcript.stripPlaceholders(s) == oldStrip(s), "strip of \(s.debugDescription)")
         }
     }
+
+    // MARK: - F4: scrubbers reach the header, roster, labels, and events
+
+    @Test("phone scrubber on: the 1:1 header does not show the number")
+    func scrubberCoversOneToOneHeader() {
+        var scope = Export.Scope()
+        scope.enabledScrubbers = [.phone, .email]
+        let out = Export.render(
+            records: [rec("p1", 0, "Them", "call me at 816-555-0123")], number: "+18165550188",
+            formats: [.txt, .jsonl], scope: scope)
+        let txt = out.txt ?? ""
+        #expect(!txt.contains("8165550188") && !txt.contains("555-0123"))
+        #expect(txt.contains("# iMessage transcript with [redacted]"))
+        #expect(txt.contains("Them = [redacted]"))
+        let email = Export.render(
+            records: [rec("p2", 0, "Them", "hi")], number: "jane@example.com", formats: [.txt],
+            scope: scope)
+        #expect(!(email.txt ?? "").contains("jane@"))
+        let named = Export.render(
+            records: [rec("p3", 0, "Them", "hi")], number: "Sarah Chen", formats: [.txt],
+            scope: scope)
+        #expect((named.txt ?? "").contains("Them = Sarah Chen"), "a name is not an identifier")
+    }
+
+    @Test("phone scrubber on: group roster, labels, reactions, and events use neutral labels")
+    func scrubberCoversGroupIdentity() {
+        var scope = Export.Scope()
+        scope.enabledScrubbers = [.phone, .email]
+        scope.showSystemEvents = true
+        let number = "(913) 555-0142"
+        let group = Transcript.GroupRenderInfo(
+            name: "Alice, \(number)", participantLabels: ["Alice", number, "bob@example.com"])
+        let records = [
+            MessageRecord(
+                guid: "g1", date: Fixtures.t0, speaker: number, isTarget: false,
+                service: "iMessage", text: "hi all, my email is z@example.com",
+                hadAttachment: false, reactions: [Reaction(by: "bob@example.com", emoji: "❤️")]),
+            MessageRecord(
+                guid: "g2", date: Fixtures.t0.addingTimeInterval(60), speaker: "Alice",
+                isTarget: false, service: "iMessage", text: "welcome!", hadAttachment: false,
+                reactions: [Reaction(by: number, emoji: "👍")]),
+        ]
+        let events = [
+            Transcript.SystemEvent(
+                date: Fixtures.t0.addingTimeInterval(30), line: "Alice added \(number)"),
+            Transcript.SystemEvent(
+                date: Fixtures.t0.addingTimeInterval(40), line: "Alice removed (844) 399-6927"),
+        ]
+        let out = Export.render(
+            records: records, number: "chat1", formats: [.txt, .jsonl], scope: scope,
+            group: group, systemEvents: events)
+        let txt = out.txt ?? ""
+        let jsonl = out.jsonl ?? ""
+        for leak in ["555-0142", "399-6927", "bob@", "z@example"] {
+            #expect(!txt.contains(leak), "TXT hides \(leak)")
+            #expect(!jsonl.contains(leak), "JSONL hides \(leak)")
+        }
+        #expect(txt.contains("# iMessage group transcript: \"Alice, Member 1\""))
+        #expect(
+            txt.contains("# Participants: Me = the account owner · Alice · Member 1 · Member 2"))
+        #expect(txt.contains("Member 1: hi all, my email is [redacted]  [Member 2: ❤️]"))
+        #expect(txt.contains("Alice: welcome!  [Member 1: 👍]"))
+        #expect(txt.contains("— Alice added Member 1"))
+        #expect(txt.contains("— Alice removed [redacted]"))
+        let pro = Export.preparedRedactedRecords(records, scope: scope, redactions: RedactionSet())
+        #expect(pro.map(\.speaker) == ["Member 1", "Alice"])
+        #expect(pro.flatMap(\.reactions).map(\.by) == ["Member 2", "Member 1"])
+        #expect(
+            Export.preparedRecords(records, scope: scope).map(\.speaker) == ["Member 1", "Alice"])
+    }
+
+    @Test("scrubbers off: labels and header are unchanged")
+    func scrubbersOffKeepIdentity() {
+        let out = Export.render(
+            records: [rec("p1", 0, "Them", "hi")], number: "+18165550188", formats: [.txt])
+        #expect((out.txt ?? "").contains("Them = +18165550188"))
+    }
 }

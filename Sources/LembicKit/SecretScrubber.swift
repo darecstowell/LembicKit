@@ -34,24 +34,32 @@ public enum SecretScrubber {
 
         for r in records {
             guard let guid = r.guid else { continue }  // can't anchor a nil-guid message
-            let ns = r.text as NSString
-            let whole = NSRange(location: 0, length: ns.length)
-            guard whole.length > 0 else { continue }
-
-            if categories.contains(.phone) {
-                appendDataDetectorMatches(.phoneNumber, ns, whole, guid, into: &set)
-            }
-            if categories.contains(.postalAddress) {
-                appendDataDetectorMatches(.address, ns, whole, guid, into: &set)
-            }
-            if categories.contains(.email) {
-                appendRegexMatches(emailRegex, ns, whole, guid, into: &set)
-            }
-            if categories.contains(.otp) {
-                appendOTPMatches(ns, whole, guid, into: &set)
+            for range in ranges(in: r.text as NSString, categories: categories) {
+                set.add(Redaction(guid: guid, range: range))
             }
         }
         return set
+    }
+
+    /// The UTF-16 ranges the enabled `categories` remove from one string.
+    static func ranges(in ns: NSString, categories: Set<ScrubberCategory>) -> [Range<Int>] {
+        let whole = NSRange(location: 0, length: ns.length)
+        guard whole.length > 0, !categories.isEmpty else { return [] }
+        var set = RedactionSet()
+        let guid = ""
+        if categories.contains(.phone) {
+            appendDataDetectorMatches(.phoneNumber, ns, whole, guid, into: &set)
+        }
+        if categories.contains(.postalAddress) {
+            appendDataDetectorMatches(.address, ns, whole, guid, into: &set)
+        }
+        if categories.contains(.email) {
+            appendRegexMatches(emailRegex, ns, whole, guid, into: &set)
+        }
+        if categories.contains(.otp) {
+            appendOTPMatches(ns, whole, guid, into: &set)
+        }
+        return set.all.compactMap(\.range).sorted { $0.lowerBound < $1.lowerBound }
     }
 
     // MARK: - Phone + postal address (Apple NSDataDetector)

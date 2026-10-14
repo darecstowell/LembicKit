@@ -63,6 +63,7 @@ These are the core nouns, drawn from the actual type names.
 | `RedactionMap.swift` | Source-to-output UTF-16 offset map for one message body | `OffsetMap` (internal) |
 | `SecretDetector.swift` | On-device detection of high-harm secrets (flag for review) | `SecretDetector.detect` |
 | `SecretScrubber.swift` | On-device opt-in auto-remove of ubiquitous PII | `SecretScrubber.scrub` |
+| `IdentityScrub.swift` | Carries enabled scrubbers to the header identifier, group name, roster, speaker labels, reaction authors, and event lines (an identifier label becomes `Member N`) | `IdentityScrub` (internal) |
 | `Contacts.swift` | Build the normalized-handle to name/avatar map; handle normalization | `ContactsMap`, `buildContactInfo`, `normalizeHandle`, `normalizePhone`, `resolve` |
 | `Attachments.swift` | Typed attachment placeholder mapping | `AttachmentInfo`, `AttachmentInfo.placeholder` |
 | `AttributedBody.swift` | Decode the typedstream `attributedBody` blob to plain text | `AttributedBody.decode` |

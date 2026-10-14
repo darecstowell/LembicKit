@@ -295,7 +295,7 @@ extension Export {
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
-        let filtered = Self.records(records, scope: scope)
+        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: scope)
         // The PN alias map is built from the date-filtered set — the same input
         // `compactText`/`jsonLines` see — so the speaker numbering is identical.
         let aliases =
@@ -339,6 +339,12 @@ extension Export {
             guid: record.guid, date: record.date, speaker: speaker,
             isTarget: record.isTarget, service: record.service, text: text,
             hadAttachment: record.hadAttachment, reactions: reactions)
+    }
+
+    /// `records` with identifier speaker labels and reaction authors made neutral
+    /// when a scrubber is on (the same labels `render` shows).
+    static func identityScrubbed(_ records: [MessageRecord], scope: Scope) -> [MessageRecord] {
+        IdentityScrub(categories: scope.enabledScrubbers, records: records).records(records)
     }
 
     /// The **effective** redaction set for a render: the caller's manual
@@ -393,7 +399,7 @@ extension Export {
     ) -> [MessageRecord] {
         // The same date-filtered slice the renderer scans, so the scrubber fold and
         // the body render see exactly what is exported.
-        let filtered = Self.records(records, scope: scope)
+        let filtered = Self.identityScrubbed(Self.records(records, scope: scope), scope: scope)
         let effective = Self.effectiveRedactions(
             manual: redactions, records: filtered, scope: scope)
         // The speaker→PN map, built from the date-filtered set so the in-body alias
@@ -477,25 +483,30 @@ extension Export {
                 ?? systemEvents
             : []
 
+        // Enabled scrubbers also reach the header, roster, labels, and events.
+        let identity = IdentityScrub(
+            categories: scope.enabledScrubbers, records: filtered, group: group)
+        let shown = identity.records(filtered)
+
         var txt: String?
         var result: Transcript.RenderResult?
         if formats.contains(.txt) {
             let rendered = Transcript.compactText(
-                records: filtered, number: number, trim: scope.trim,
+                records: shown, number: identity.identifier(number), trim: scope.trim,
                 redactions: effectiveRedactions, detected: detected,
-                anonymize: scope.anonymizeSpeakers, group: group,
-                systemEvents: scopedEvents)
+                anonymize: scope.anonymizeSpeakers, group: identity.group(group),
+                systemEvents: identity.events(scopedEvents))
             txt = rendered.text
             result = rendered
         }
         let jsonl =
             formats.contains(.jsonl)
             ? Transcript.jsonLines(
-                records: filtered, redactions: effectiveRedactions,
+                records: shown, redactions: effectiveRedactions,
                 anonymize: scope.anonymizeSpeakers) : nil
 
         return Rendered(
             txt: txt, jsonl: jsonl, result: result, detected: detected,
-            records: filtered, messageCount: filtered.count)
+            records: shown, messageCount: shown.count)
     }
 }
