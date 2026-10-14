@@ -36,7 +36,7 @@ These are the core nouns, drawn from the actual type names.
 
 **AttributedBody** (`AttributedBody.swift`). Decodes the `attributedBody` typedstream blob (via the Madrid `TypedStream` dependency) to the plain backing string of its `NSAttributedString`. Used because many message bodies live only in this blob, not the `text` column.
 
-**Redaction / RedactionSet** (`Redaction.swift`). A `Redaction` anchors to one message by `guid`, with a half-open UTF-16 range into that message's `text` (a `nil` range means redact the whole message). `RedactionSet` is the per-conversation, value-typed, `Sendable` set; a whole-message redaction supersedes (absorbs) every span redaction for the same guid.
+**Redaction / RedactionSet** (`Redaction.swift`). A `Redaction` anchors to one message by `guid`, with a half-open UTF-16 range into that message's `text` (a `nil` range means redact the whole message). `RedactionSet` is the per-conversation, value-typed, `Sendable` set; a whole-message redaction supersedes (absorbs) every span redaction for the same guid. A span past the end of its message (a stale anchor) hides the whole message, so a changed text never fails open. `RedactionAnchor` adds an HMAC fingerprint of the covered text, so a caller that saves redactions can move them when the text shifts.
 
 **RedactionMap / OffsetMap** (`RedactionMap.swift`). The forward/inverse coordinate map for one message body: source `text` UTF-16 index to output-body UTF-16 index and back. It models the redaction span collapse and the newline-to-newline-plus-8-spaces indentation as one breakpoint table, so the app can map an output selection back to a source range for click-to-undo.
 
@@ -60,6 +60,7 @@ These are the core nouns, drawn from the actual type names.
 | `Transcript.swift` | Render `.txt` and `.jsonl`; redaction splice; anonymization; render marks for the app | `Transcript.compactText`, `Transcript.jsonLines`, `Transcript.redactedText`, `Transcript.renderedBody`, `RenderResult`, `RenderSpan`, `RedactedMark`, `HighlightMark`, `TrimOptions`, `GroupRenderInfo`, `SystemEvent` |
 | `Export.swift` | The single extract-detect-render pipeline seam, plus prepared-record helpers for alternate output formats | `Export`, `Export.render`, `Export.Scope`, `Export.Format`, `Export.Rendered`, `records`, `preparedRecords`, `effectiveRedactions`, `preparedRedactedRecords` |
 | `Redaction.swift` | Redaction value types and the category enums | `Redaction`, `RedactionSet`, `SecretCategory`, `ScrubberCategory`, `DetectedSecret` |
+| `RedactionAnchor.swift` | Saved redactions with a keyed fingerprint of the covered text, so a changed message moves the anchor or hides the whole message | `RedactionAnchor`, `RedactionSet.anchors(in:key:)`, `RedactionSet.resolve(_:records:key:)` |
 | `RedactionMap.swift` | Source-to-output UTF-16 offset map for one message body | `OffsetMap` (internal) |
 | `SecretDetector.swift` | On-device detection of high-harm secrets (flag for review) | `SecretDetector.detect` |
 | `SecretScrubber.swift` | On-device opt-in auto-remove of ubiquitous PII | `SecretScrubber.scrub` |

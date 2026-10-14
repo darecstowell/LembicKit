@@ -386,12 +386,19 @@ public enum Transcript {
     public static func redactedText(
         of record: MessageRecord, redactions: RedactionSet
     ) -> String? {
-        if let guid = record.guid,
-            redactions.redactions(forGuid: guid).contains(where: { $0.range == nil })
-        {
-            return nil
-        }
+        if coversWholeMessage(record, redactions: redactions) { return nil }
         return applySpanRedactions(to: record.text, guid: record.guid, redactions: redactions)
+    }
+
+    /// True when a redaction hides the whole message: a nil range, a span over the
+    /// whole text, or a span past the end of the text (a stale anchor never fails open).
+    static func coversWholeMessage(_ record: MessageRecord, redactions: RedactionSet) -> Bool {
+        guard let guid = record.guid else { return false }
+        let len = (record.text as NSString).length
+        return redactions.redactions(forGuid: guid).contains { r in
+            guard let range = r.range else { return true }
+            return range == 0..<len || range.lowerBound < 0 || range.upperBound > len
+        }
     }
 
     /// The unified, ascending, non-overlapping `[BodySubstitution]` list for ONE
@@ -491,13 +498,8 @@ public enum Transcript {
         of record: MessageRecord, redactions: RedactionSet, names: NameMatcher?,
         stripPlaceholders: Bool
     ) -> String? {
-        if let guid = record.guid {
-            let rs = redactions.redactions(forGuid: guid)
-            let len = (record.text as NSString).length
-            // Whole-message redaction (explicit nil-range OR a span covering the
-            // whole text) → omit the row (no inline splice).
-            if rs.contains(where: { $0.range == nil || $0.range == 0..<len }) { return nil }
-        }
+        // Whole-message redaction → omit the row (no inline splice).
+        if coversWholeMessage(record, redactions: redactions) { return nil }
         let source = record.text as NSString
         let reps = bodyReplacements(
             source: source, guid: record.guid, redactions: redactions, names: names,
@@ -546,22 +548,11 @@ public enum Transcript {
         for r in records {
             let strip = trim.dropAttachmentPlaceholders && r.hadAttachment
             if strip, stripPlaceholders(r.text).isEmpty { continue }
-            // Whole-message redaction? Either an explicit nil-range redaction, or
-            // a span that covers the entire (pre-trim) text. nil-guid records can
-            // never be redacted.
+            // Whole-message redaction? A nil range, a span over the entire source
+            // text, or a stale span past its end. nil-guid records are never redacted.
             var whole: Redaction?
-            if let guid = r.guid {
-                let rs = redactions.redactions(forGuid: guid)
-                if rs.contains(where: { $0.range == nil }) {
-                    whole = Redaction(guid: guid, range: nil)
-                } else {
-                    // A span that covers the entire (pre-trim) text is a whole-
-                    // message redaction in disguise; normalize it to a tombstone.
-                    let len = (r.text as NSString).length
-                    if rs.contains(where: { $0.range == 0..<len }) {
-                        whole = Redaction(guid: guid, range: nil)
-                    }
-                }
+            if let guid = r.guid, coversWholeMessage(r, redactions: redactions) {
+                whole = Redaction(guid: guid, range: nil)
             }
             emit.append(
                 Emit(
