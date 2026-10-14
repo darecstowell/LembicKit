@@ -42,24 +42,8 @@ public enum ContactsMap {
 
     /// `region` (ISO 3166-1 alpha-2) completes numbers saved without a country code.
     public static func buildContactInfo(region: String = currentRegion()) throws -> ContactInfo {
-        // Test / fixture override: read contacts from a vCard file instead
-        // of the system store, so a fixture gets names + photo avatars
-        // without importing anything into Contacts.app (and without a TCC prompt).
-        // A normal launch sets no such variable, so the store path is unchanged.
-        if let path = ProcessInfo.processInfo.environment["LEMBIC_CONTACTS"],
-            !path.isEmpty
-        {
-            return try buildContactInfo(
-                vcardAt: URL(fileURLWithPath: (path as NSString).expandingTildeInPath),
-                region: region)
-        }
-        // Bundled fallback: if a `DemoData/contacts.vcf` ships with the executable,
-        // read names + avatars from it instead of the system store — no Contacts
-        // prompt, no address-book access. Absent unless a build bundles one.
-        if let demo = Bundle.main.url(
-            forResource: "contacts", withExtension: "vcf", subdirectory: "DemoData")
-        {
-            return try buildContactInfo(vcardAt: demo, region: region)
+        if let file = vcardOverride() {
+            return try buildContactInfo(vcardAt: file, region: region)
         }
 
         guard try requestAccess() else { throw ContactsError.accessDenied }
@@ -86,6 +70,28 @@ public enum ContactsMap {
         }
         return maps.info
     }
+
+    /// A vCard to read instead of the system store. `LEMBIC_CONTACTS` counts in a
+    /// Debug build or outside an app bundle (the CLI); a bundled
+    /// `DemoData/contacts.vcf` counts in a Debug build only.
+    static func vcardOverride(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundle: Bundle = .main, isDebugBuild: Bool = isDebugBuild
+    ) -> URL? {
+        if let path = environment["LEMBIC_CONTACTS"], !path.isEmpty,
+            isDebugBuild || bundle.bundleURL.pathExtension != "app"
+        {
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        }
+        guard isDebugBuild else { return nil }
+        return bundle.url(forResource: "contacts", withExtension: "vcf", subdirectory: "DemoData")
+    }
+
+    #if DEBUG
+        static let isDebugBuild = true
+    #else
+        static let isDebugBuild = false
+    #endif
 
     /// Build the same maps from a vCard file instead of the system store — the
     /// `LEMBIC_CONTACTS` path. vCard-parsed contacts carry full PHOTO data rather

@@ -147,7 +147,7 @@ Relevant flags: `--union` (merge all of a person's 1:1 chats into one export, wi
 
 Note: the executable embeds an `Info.plist` via linker flags (`Sources/lembic-cli/Info.plist`), because TCC auto-denies privacy requests from a binary that has no usage description.
 
-Fixtures: tests build in-memory SQLite databases from the schema strings in `Tests/LembicKitTests/Support/Fixtures.swift` via `makeInMemoryDB` / `openChatDB`. A demo path lets `ContactsMap` read names from a vCard (`Tests/LembicKitTests/Fixtures/contacts.vcf`, or any file pointed to by the `LEMBIC_CONTACTS` environment variable) instead of the system store, so a fixture gets real names without a TCC prompt.
+Fixtures: tests build in-memory SQLite databases from the schema strings in `Tests/LembicKitTests/Support/Fixtures.swift` via `makeInMemoryDB` / `openChatDB`. A demo path lets `ContactsMap` read names from a vCard (`Tests/LembicKitTests/Fixtures/contacts.vcf`, or any file pointed to by the `LEMBIC_CONTACTS` environment variable) instead of the system store, so a fixture gets real names without a TCC prompt. `LEMBIC_CONTACTS` works in Debug builds and outside an app bundle (the CLI); a bundled `DemoData/contacts.vcf` is read in Debug builds only, so a Release app always uses the real Contacts store.
 
 ## Extension points
 

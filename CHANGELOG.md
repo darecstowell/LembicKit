@@ -44,6 +44,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   a database without it still exports.
 - The detectors also scan the group name, rename events, labels, and the header;
   a hit there reads `[redacted]` (F27).
+- A Release app build no longer reads contacts from a bundled
+  `DemoData/contacts.vcf` or from `LEMBIC_CONTACTS`, so a stray file cannot
+  replace the user's Contacts. Debug builds and the CLI still honor
+  `LEMBIC_CONTACTS`; only Debug builds read `DemoData`.
 
 ### Changed
 
