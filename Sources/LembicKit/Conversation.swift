@@ -189,21 +189,23 @@ public enum Conversations {
     ///
     /// `contactIDs` (`ContactsMap.ContactInfo.contactIDs`) says which handles share
     /// one Contacts card. Without it, a name alone never joins two handles.
+    /// `region` completes numbers stored without a country code.
     public static func list(
         from db: ChatDatabase,
         resolvingContacts: Bool = true,
         contacts: [String: String]? = nil,
         contactIDs: [String: String]? = nil,
-        stitch: GroupStitch = .exact
+        stitch: GroupStitch = .exact,
+        region: String = ContactsMap.currentRegion()
     ) throws -> [Conversation] {
         let summaries = try db.conversationSummaries()
-        let names: [String: String]
+        var names: [String: String]
         var cards = contactIDs ?? [:]
         if let contacts {
             names = contacts
         } else if resolvingContacts {
             // Contacts is optional: a denial falls back to identifiers, never throws.
-            let info = try? ContactsMap.buildContactInfo()
+            let info = try? ContactsMap.buildContactInfo(region: region)
             names = info?.names ?? [:]
             if contactIDs == nil { cards = info?.contactIDs ?? [:] }
         } else {
@@ -218,9 +220,16 @@ public enum Conversations {
         let handleLabels = try db.handleLabels()
         let handlesByIdentifier = Dictionary(
             grouping: handleLabels,
-            by: { ContactsMap.normalizeHandle($0.value) }
+            by: { ContactsMap.normalizeHandle($0.value, defaultRegion: region) }
         ).mapValues { Set($0.map(\.key)) }
-        let oneToOnes = group(summaries, contacts: names, handlesByIdentifier: handlesByIdentifier)
+        (names, cards) = ContactsMap.withNationalFallback(
+            names: names, contactIDs: cards,
+            handles: Array(handlesByIdentifier.keys)
+                + summaries.compactMap(\.identifier).map {
+                    ContactsMap.normalizeHandle($0, defaultRegion: region)
+                })
+        let oneToOnes = group(
+            summaries, contacts: names, handlesByIdentifier: handlesByIdentifier, region: region)
 
         // Group chats (style=43): exact-participant-set stitched, then merged into
         // the same recency-sorted list. handleLabels lets the roster carry each
@@ -232,11 +241,11 @@ public enum Conversations {
         let participantCounts = try db.groupParticipantMessageCounts()
         let people = personKeys(
             handleLabels: handleLabels, personCentricIDs: try db.personCentricIDs(),
-            contactIDs: cards)
+            contactIDs: cards, region: region)
         var groups = groupGroups(
             groupSummaries, handleLabels: handleLabels, names: names,
             participantCounts: participantCounts, personKeys: people,
-            chatLinks: try db.groupChatLinks())
+            chatLinks: try db.groupChatLinks(), region: region)
 
         // The opt-in fuzzy merge: a conservative second pass that merges exact-set
         // groups representing the same group with changed membership. `.exact` (the
@@ -274,7 +283,8 @@ public enum Conversations {
     public static func group(
         _ summaries: [ChatDatabase.ConversationSummary],
         contacts: [String: String],
-        handlesByIdentifier: [String: Set<Int64>] = [:]
+        handlesByIdentifier: [String: Set<Int64>] = [:],
+        region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
         struct Acc {
             var chatIDs = Set<Int64>()
@@ -289,7 +299,7 @@ public enum Conversations {
         var groups: [String: Acc] = [:]
         for s in summaries {
             let ident = s.identifier ?? "h\(s.handleID)"
-            let norm = ContactsMap.normalizeHandle(ident)
+            let norm = ContactsMap.normalizeHandle(ident, defaultRegion: region)
             let name = contacts[norm]
             let key = name ?? norm
             var acc = groups[key] ?? Acc()
@@ -355,10 +365,12 @@ public enum Conversations {
         names: [String: String] = [:],
         participantCounts: [Int64: [Int64: Int]] = [:],
         personKeys: [Int64: String] = [:],
-        chatLinks: [Int64: Set<String>] = [:]
+        chatLinks: [Int64: Set<String>] = [:],
+        region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
         func identifier(_ handle: Int64) -> String {
-            handleLabels[handle].map { ContactsMap.normalizeHandle($0) } ?? "h\(handle)"
+            handleLabels[handle].map { ContactsMap.normalizeHandle($0, defaultRegion: region) }
+                ?? "h\(handle)"
         }
         func person(_ handle: Int64) -> String { personKeys[handle] ?? identifier(handle) }
 
@@ -505,12 +517,13 @@ public enum Conversations {
     public static func personKeys(
         handleLabels: [Int64: String],
         personCentricIDs: [Int64: String] = [:],
-        contactIDs: [String: String] = [:]
+        contactIDs: [String: String] = [:],
+        region: String = ContactsMap.defaultRegion
     ) -> [Int64: String] {
         let handles = handleLabels.keys.sorted()
         let normalized = Dictionary(
             uniqueKeysWithValues: handles.map {
-                ($0, ContactsMap.normalizeHandle(handleLabels[$0] ?? ""))
+                ($0, ContactsMap.normalizeHandle(handleLabels[$0] ?? "", defaultRegion: region))
             })
         var parent = Dictionary(uniqueKeysWithValues: handles.map { ($0, $0) })
         func find(_ h: Int64) -> Int64 {

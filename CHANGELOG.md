@@ -31,6 +31,14 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Non-US contacts resolve to names. `buildContactInfo`, `resolve`, and
+  `Conversations.list` take a `region:` that defaults to the new
+  `ContactsMap.currentRegion()` (the Contacts setting, else the system region).
+  `normalizePhone` strips the `00`, `011`, `0011`, and `010` exit codes, knows
+  every calling code, keeps the trunk `0` in Italy, and applies the North American
+  11-digit rule only in North America. A number saved in national form under the
+  wrong country code matches on its last nine digits when exactly one card does
+  (lembickit.md F5).
 - App messages no longer vanish. Apple Pay, polls, Check In, games and other
   third-party apps, handwriting, and Digital Touch each render as one line read
   from `payload_data`, for example `[Apple Pay: Sent $20 with Apple Pay.]`. An
