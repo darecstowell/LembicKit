@@ -51,6 +51,10 @@ extension Transcript {
         // reverse the per-message transforms. Internal — not part of the API.
         let bodyMaps: [String: OffsetMap]
 
+        /// The render of an empty scope: no text, spans, or marks.
+        public static let empty = RenderResult(
+            text: "", spans: [], redactedMarks: [], highlightMarks: [], bodyMaps: [:])
+
         /// Map an output selection (NSRange into `text`) to the redaction(s) it
         /// implies — one per message body the selection touches, clamped to that
         /// body and reversed through the indentation transform to a UTF-16

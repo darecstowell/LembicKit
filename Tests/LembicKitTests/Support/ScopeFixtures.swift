@@ -53,6 +53,37 @@ enum ScopeFixtures {
         return out
     }
 
+    /// Short runs where a flag depends on a neighbor: a keyword or question in the
+    /// message before, a card split over sends, and a key block over three messages.
+    static func edgeThread() -> [MessageRecord] {
+        let runs: [[(String, String)]] = [
+            [("Them", "what's your routing number"), ("Me", "021000021")],
+            [("Them", "what's the wifi password?"), ("Me", "hunter2hunter2")],
+            [("Them", "what's the door code"), ("Me", "4471#")],
+            [("Me", "4111 1111"), ("Me", "1111 1111")],
+            [("Them", "what's your social"), ("Me", "123 45"), ("Me", "6789")],
+            [("Me", "4111"), ("Me", "1111"), ("Me", "1111"), ("Me", "1111")],
+            [
+                ("Them", "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA"),
+                ("Them", "MIIEowIBAAKCAQEAx"), ("Them", "-----END RSA PRIVATE KEY-----"),
+            ],
+        ]
+        var out: [MessageRecord] = []
+        var date = base
+        for (k, run) in (runs + runs.reversed()).enumerated() {
+            for (speaker, text) in run {
+                date = date.addingTimeInterval(30)
+                out.append(
+                    MessageRecord(
+                        guid: "e\(out.count)", date: date, speaker: speaker,
+                        isTarget: speaker == "Them", service: "iMessage", text: text,
+                        hadAttachment: false, reactions: []))
+            }
+            date = date.addingTimeInterval(k % 2 == 0 ? 60 : 2000)
+        }
+        return out
+    }
+
     /// Every message of the redaction corpus, in file order.
     static func corpusMessages() throws -> [String] {
         let names = [

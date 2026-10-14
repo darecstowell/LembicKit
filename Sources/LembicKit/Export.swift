@@ -164,9 +164,8 @@ extension Export {
     /// - `result` is the redaction-aware `RenderResult` (spans + marks) a GUI caller
     ///   needs for select-to-redact + an unredacted-secret count; nil
     ///   when no `.txt` was asked for or the scope is empty (the CLI ignores it).
-    ///   `RenderResult`'s init is internal to the engine, so an empty scope
-    ///   cannot synthesize one (`nil` *is* the empty render, which a caller
-    ///   already treats as "empty scope," not "error.")
+    ///   A caller that wants a value for an empty scope uses
+    ///   `result ?? .empty` (`Transcript.RenderResult.empty`).
     /// - `records` is the in-range record set, so a caller can size a meter /
     ///   reconcile counts without re-extracting.
     /// - `skipped` is the in-range rows the extractor read but could not show.
@@ -470,12 +469,21 @@ extension Export {
     public static func effectiveRedactions(
         manual: RedactionSet, records: [MessageRecord], scope: Scope
     ) -> RedactionSet {
+        folded(manual: manual, scrubbed: scrubbed(records, scope: scope), records: records)
+    }
+
+    /// The enabled scrubbers' spans over `records` (empty when every scrubber is off).
+    static func scrubbed(_ records: [MessageRecord], scope: Scope) -> RedactionSet {
+        scope.enabledScrubbers.isEmpty
+            ? RedactionSet() : SecretScrubber.scrub(in: records, categories: scope.enabledScrubbers)
+    }
+
+    /// `manual` plus the `scrubbed` spans, with redactions carried onto quote tapbacks.
+    static func folded(
+        manual: RedactionSet, scrubbed: RedactionSet, records: [MessageRecord]
+    ) -> RedactionSet {
         var effective = manual
-        if !scope.enabledScrubbers.isEmpty {
-            for r in SecretScrubber.scrub(in: records, categories: scope.enabledScrubbers).all {
-                effective.add(r)
-            }
-        }
+        for r in scrubbed.all { effective.add(r) }
         return QuoteReactions.carryRedactions(effective, records: records)
     }
 
@@ -533,6 +541,25 @@ extension Export {
         // (1) Filter to the scope's date window (nil = full history) — the single
         // filtering path, shared with the public `records(_:scope:)` accessor.
         let filtered = Self.unredactedRecords(records, scope: scope)
+        return render(
+            filtered: filtered, number: number, formats: formats, scope: scope,
+            redactions: redactions, group: group, systemEvents: systemEvents, skipped: skipped,
+            noteToSelf: noteToSelf,
+            detected: {
+                detect ? SecretDetector.detect(in: filtered, enabled: scope.enabledDetectors) : []
+            },
+            scrubbed: { Self.scrubbed(filtered, scope: scope) })
+    }
+
+    /// Steps 2 and 3 of `render(records:...)` over the date-filtered records.
+    /// `detected` and `scrubbed` give the detector flags and scrubber spans over
+    /// `filtered`; `ScopeRenderer` passes memoized ones.
+    static func render(
+        filtered: [MessageRecord], number: String, formats: Set<Format>, scope: Scope,
+        redactions: RedactionSet, group: Transcript.GroupRenderInfo?,
+        systemEvents: [Transcript.SystemEvent], skipped: [SkippedMessage], noteToSelf: Bool,
+        detected detect: () -> [DetectedSecret], scrubbed scrub: () -> RedactionSet
+    ) -> Rendered {
         let scopedSkips =
             scope.dateRange.map { range in
                 skipped.filter { $0.date.map(range.contains) ?? false }
@@ -550,16 +577,15 @@ extension Export {
         // (2) Detect over the FILTERED set — cheap, pure, idempotent. Honor the
         // per-category "flag for review" toggle: a disabled detector category is
         // never returned (default = all on, so today's behavior is unchanged).
-        let detected =
-            detect ? SecretDetector.detect(in: filtered, enabled: scope.enabledDetectors) : []
+        let detected = detect()
 
         // (2b) Fold the enabled opt-in scrubbers (default `[]` =
         // no-op) ON TOP of the caller's manual `redactions` via the shared
         // `effectiveRedactions` helper — the SINGLE home for the scrubber→redaction
         // fold, reused by the downstream-formatter path so a scrubbed value can never reach
         // one format in cleartext while another shows `[redacted]`.
-        let effectiveRedactions = Self.effectiveRedactions(
-            manual: redactions, records: filtered, scope: scope)
+        let effectiveRedactions = Self.folded(
+            manual: redactions, scrubbed: scrub(), records: filtered)
 
         // (3) Render. Both renderers are handed the same `redactions` so neither
         // output leaks a redacted span. The `.txt` renderer additionally
