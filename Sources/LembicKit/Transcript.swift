@@ -30,10 +30,14 @@ public enum Transcript {
     public struct GroupRenderInfo: Sendable, Equatable {
         public let name: String
         public let participantLabels: [String]
+        /// People who wrote or were named in an event but are no longer members.
+        /// The header lists them after the members, as "Carla (left)".
+        public let formerLabels: [String]
 
-        public init(name: String, participantLabels: [String]) {
+        public init(name: String, participantLabels: [String], formerLabels: [String] = []) {
             self.name = name
             self.participantLabels = participantLabels
+            self.formerLabels = formerLabels
         }
     }
 
@@ -89,9 +93,11 @@ public enum Transcript {
     /// markers from `AttachmentInfo.placeholder` plus the FindMy `[shared
     /// location]` fallback (`Extractor.renderText`). Kept here because stripping
     /// is a render-layer concern; keep in lockstep if a new marker is added.
+    /// Genmoji (`[genmoji: …]`) is stripped by prefix; a voice note's words
+    /// (`[audio: "…"]`) are content and stay.
     static let placeholderTokens = [
         "[photo]", "[video]", "[gif]", "[audio]", "[pdf]",
-        "[contact]", "[attachment]", "[shared location]",
+        "[contact]", "[attachment]", "[shared location]", "[sticker]", "[location]",
     ]
 
     /// Remove placeholder tokens from one already-rendered message body. Caller
@@ -102,8 +108,131 @@ public enum Transcript {
         for token in placeholderTokens {
             out = out.replacingOccurrences(of: token, with: " ")
         }
+        out = out.replacingOccurrences(
+            of: #"\[genmoji: [^\]]*\]"#, with: " ", options: .regularExpression)
         return Extractor.collapseSpaceRuns(out)
             .trimmingCharacters(in: Extractor.pythonWhitespace)
+    }
+
+    /// The legend entries, in a fixed order, for the placeholder kinds that occur
+    /// in `bodies`. A voice note with words counts as `[audio]`.
+    static func legendTokens(in bodies: [String]) -> [String] {
+        let kinds: [(token: String, matches: [String])] = [
+            ("[photo]", ["[photo]"]), ("[video]", ["[video]"]), ("[gif]", ["[gif]"]),
+            ("[audio]", ["[audio]", "[audio: \""]), ("[pdf]", ["[pdf]"]),
+            ("[contact]", ["[contact]"]), ("[location]", ["[location]"]),
+            ("[shared location]", ["[shared location]"]), ("[sticker]", ["[sticker]"]),
+            ("[genmoji: …]", ["[genmoji: "]), ("[attachment]", ["[attachment]"]),
+        ]
+        var found = Set<String>()
+        for body in bodies where body.utf8.contains(0x5B) {
+            for kind in kinds where !found.contains(kind.token) {
+                if kind.matches.contains(where: body.contains) { found.insert(kind.token) }
+            }
+        }
+        return kinds.map(\.token).filter(found.contains)
+    }
+
+    /// The local date and time strings the renderer prints, without a
+    /// DateFormatter call per message. Dates with a fractional second or outside years 1000 to 9999 use a
+    /// DateFormatter, so the output is always the formatter's.
+    final class LocalClock {
+        private let timeZone: TimeZone
+        private var offset = 0
+        private var dayNumber = Int.min
+        private var dayText = ""
+        private lazy var formatters = (
+            day: Transcript.formatter("yyyy-MM-dd", timeZone: timeZone),
+            weekday: Transcript.formatter("EEE", timeZone: timeZone),
+            time: Transcript.formatter("HH:mm", timeZone: timeZone),
+            stamp: Transcript.formatter("yyyy-MM-dd'T'HH:mm:ssxxx", timeZone: timeZone)
+        )
+        private static let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        private static let twoDigits = (0..<100).map { $0 < 10 ? "0\($0)" : "\($0)" }
+
+        init(timeZone: TimeZone) { self.timeZone = timeZone }
+
+        /// Local seconds since 1970, or nil when the fast path does not apply.
+        private func localSeconds(_ date: Date) -> Int? {
+            let t = date.timeIntervalSince1970
+            guard t == t.rounded(.down), t > -30_000_000_000, t < 250_000_000_000 else {
+                return nil
+            }
+            offset = timeZone.secondsFromGMT(for: date)
+            return Int(t) + offset
+        }
+
+        private func days(_ seconds: Int) -> Int {
+            seconds >= 0 ? seconds / 86_400 : (seconds - 86_399) / 86_400
+        }
+
+        func day(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else { return formatters.day.string(from: date) }
+            let number = days(seconds)
+            if number != dayNumber {
+                // Days since 1970 to a Gregorian date (H. Hinnant, civil_from_days).
+                let z = number + 719_468
+                let era = (z >= 0 ? z : z - 146_096) / 146_097
+                let doe = z - era * 146_097
+                let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+                let mp = (5 * doy + 2) / 153
+                let d = doy - (153 * mp + 2) / 5 + 1
+                let m = mp < 10 ? mp + 3 : mp - 9
+                let y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+                guard (1000...9999).contains(y) else { return formatters.day.string(from: date) }
+                dayNumber = number
+                dayText = "\(y)-\(Self.twoDigits[m])-\(Self.twoDigits[d])"
+            }
+            return dayText
+        }
+
+        func weekday(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else {
+                return formatters.weekday.string(from: date)
+            }
+            return Self.weekdays[((days(seconds) + 4) % 7 + 7) % 7]
+        }
+
+        func time(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else {
+                return formatters.time.string(from: date)
+            }
+            let s = seconds - days(seconds) * 86_400
+            return "\(Self.twoDigits[s / 3600]):\(Self.twoDigits[s % 3600 / 60])"
+        }
+
+        /// ISO 8601 with the UTC offset, as `yyyy-MM-dd'T'HH:mm:ssxxx`.
+        func stamp(_ date: Date) -> String {
+            guard let seconds = localSeconds(date), !day(date).isEmpty, dayNumber == days(seconds)
+            else { return formatters.stamp.string(from: date) }
+            let s = seconds - days(seconds) * 86_400
+            let sign = offset < 0 ? "-" : "+"
+            let off = abs(offset)
+            return "\(dayText)T\(Self.twoDigits[s / 3600]):\(Self.twoDigits[s % 3600 / 60]):"
+                + "\(Self.twoDigits[s % 60])\(sign)\(Self.twoDigits[off / 3600]):"
+                + Self.twoDigits[off % 3600 / 60]
+        }
+    }
+
+    /// Each DST fall-back hour between two dates: the instants whose local clock
+    /// time happens twice.
+    static func repeatedHours(from start: Date, to end: Date, in timeZone: TimeZone)
+        -> [Range<Date>]
+    {
+        var windows: [Range<Date>] = []
+        var cursor = start.addingTimeInterval(-86_400)
+        while let change = timeZone.nextDaylightSavingTimeTransition(after: cursor),
+            change <= end.addingTimeInterval(86_400)
+        {
+            let before = timeZone.secondsFromGMT(for: change.addingTimeInterval(-1))
+            let shift = TimeInterval(before - timeZone.secondsFromGMT(for: change))
+            if shift > 0 {
+                windows.append(change.addingTimeInterval(-shift)..<change.addingTimeInterval(shift))
+            }
+            cursor = change
+        }
+        return windows
     }
 
     static func formatter(_ format: String, timeZone: TimeZone = .current) -> DateFormatter {
@@ -482,11 +611,10 @@ public enum Transcript {
         anonymize: Bool = false,
         group: GroupRenderInfo? = nil,
         systemEvents: [SystemEvent] = [],
-        timeZone: TimeZone = .current
+        timeZone: TimeZone = .current,
+        noteToSelf: Bool = false
     ) -> RenderResult {
-        let day = formatter("yyyy-MM-dd", timeZone: timeZone)
-        let weekday = formatter("EEE", timeZone: timeZone)
-        let time = formatter("HH:mm", timeZone: timeZone)
+        let local = LocalClock(timeZone: timeZone)
 
         // Speaker → "Person N" map when de-biasing; empty otherwise (alias lookups
         // fall through to the real label). Built from the raw records so the .txt
@@ -557,10 +685,12 @@ public enum Transcript {
         // Anonymizing scrubs the counterparty's number/name from the header — the
         // whole point is to hide who the thread is with.
         if let group, renderGroup {
-            out += "# iMessage group transcript: \"\(group.name)\"\n"
+            out += "# Messages group transcript: \"\(group.name)\"\n"
+        } else if noteToSelf, !anonymize {
+            out += "# Messages transcript: notes to self\n"
         } else {
             out +=
-                anonymize ? "# iMessage transcript\n" : "# iMessage transcript with \(number)\n"
+                anonymize ? "# Messages transcript\n" : "# Messages transcript with \(number)\n"
         }
         if let first = emit.first, let last = emit.last {
             var parts = ["\(comma(messages)) messages"]
@@ -569,13 +699,15 @@ public enum Transcript {
                 parts.append("\(comma(withAttachments)) with attachments")
             }
             out +=
-                "# \(day.string(from: first.date)) → \(day.string(from: last.date)) · "
+                "# \(local.day(first.date)) → \(local.day(last.date)) · "
                 + parts.joined(separator: " · ") + "\n"
         }
         if let group, renderGroup {
             // The full roster: "Me = the account owner" plus every member's label
             // (incl. any who never spoke), so an assistant can attribute every line.
-            let roster = (["Me = the account owner"] + group.participantLabels)
+            let roster =
+                (["Me = the account owner"] + group.participantLabels
+                + group.formerLabels.map { "\($0) (left)" })
                 .joined(separator: " · ")
             out += "# Participants: \(roster)\n"
         } else if anonymize {
@@ -584,6 +716,8 @@ public enum Transcript {
             let people = (1...Swift.max(aliases.count, 1)).map { "Person \($0) (P\($0))" }
                 .joined(separator: ", ")
             out += "# Speakers: \(people) — names anonymized.\n"
+        } else if noteToSelf {
+            out += "# Speakers: Me = the account owner\n"
         } else {
             out += "# Speakers: Me = the account owner, Them = \(number)\n"
         }
@@ -594,16 +728,18 @@ public enum Transcript {
             if let group, renderGroup {
                 reactor = group.participantLabels.first ?? "a member"
             } else {
-                reactor = anonymize ? "PN" : "Them"
+                reactor = anonymize ? "PN" : noteToSelf ? "Me" : "Them"
             }
             out += "# Reactions shown as [\(reactor): ❤️] after the message they target.\n"
         }
-        if !trim.dropAttachmentPlaceholders {
+        let shown = legendTokens(in: emit.map(\.text))
+        if !trim.dropAttachmentPlaceholders, !shown.isEmpty {
             out +=
-                "# Attachments shown as typed placeholders: [photo] [video] [gif] "
-                + "[audio] [pdf] [contact] [shared location].\n"
+                "# Attachments shown as typed placeholders: "
+                + shown.joined(separator: " ") + ".\n"
         }
-        out += "# Times are local, 24h. Section headers are calendar days.\n\n"
+        let zoneName = anonymize ? "" : " (\(timeZone.identifier))"
+        out += "# Times are local\(zoneName), 24h. Section headers are calendar days.\n\n"
 
         // ---- Phase 2: emit day-grouped body, applying redactions + collecting marks.
         var spans: [RenderSpan] = []
@@ -622,14 +758,28 @@ public enum Transcript {
         // pass scrubs. Sorted so the merge with the message stream is stable.
         let pendingEvents = (renderGroup ? systemEvents : []).sorted { $0.date < $1.date }
         var eventIndex = 0
+        // A clock time inside a DST fall-back hour happens twice, so it names its zone.
+        let dates = [
+            emit.first?.date, emit.last?.date, pendingEvents.first?.date,
+            pendingEvents.last?.date,
+        ].compactMap { $0 }
+        let repeated =
+            dates.min().map {
+                repeatedHours(from: $0, to: dates.max() ?? $0, in: timeZone)
+            } ?? []
+        let zone = formatter("HH:mm zzz", timeZone: timeZone)
+        func clock(_ date: Date) -> String {
+            repeated.contains { $0.contains(date) }
+                ? zone.string(from: date) : local.time(date)
+        }
         // Open the day section for `date` if it isn't the current one — shared by
         // the message loop and the event flush so an event that starts a new day
         // gets its own `## YYYY-MM-DD` header.
         func openDaySection(for date: Date) {
-            let d = day.string(from: date)
+            let d = local.day(date)
             if d != currentDay {
                 currentDay = d
-                acc.append("\n## \(d) (\(weekday.string(from: date)))\n")
+                acc.append("\n## \(d) (\(local.weekday(date)))\n")
             }
         }
         // Emit every pending event at or before `boundary` (nil ⇒ drain all),
@@ -641,7 +791,7 @@ public enum Transcript {
                 let ev = pendingEvents[eventIndex]
                 if let boundary, ev.date > boundary { break }
                 openDaySection(for: ev.date)
-                acc.append("\(time.string(from: ev.date)) — \(ev.line)\n")
+                acc.append("\(clock(ev.date)) — \(ev.line)\n")
                 eventIndex += 1
             }
         }
@@ -659,7 +809,7 @@ public enum Transcript {
                 var j = i
                 while j < emit.count,
                     emit[j].whole != nil,
-                    day.string(from: emit[j].date) == currentDay
+                    local.day(emit[j].date) == currentDay
                 {
                     j += 1
                 }
@@ -723,7 +873,7 @@ public enum Transcript {
             // Append the line, recording the body's output range. `bodyStart` is
             // measured AFTER the (possibly anonymized) prefix, so redaction /
             // highlight output ranges stay correct regardless of label length.
-            let prefix = "\(time.string(from: r.date)) \(alias(r.speaker)): "
+            let prefix = "\(clock(r.date)) \(alias(r.speaker)): "
             acc.append(prefix)
             let bodyStart = acc.length
             acc.append(indented)
@@ -807,7 +957,7 @@ public enum Transcript {
         anonymize: Bool = false,
         timeZone: TimeZone = .current
     ) -> String {
-        let full = formatter("yyyy-MM-dd HH:mm:ss", timeZone: timeZone)
+        let local = LocalClock(timeZone: timeZone)
         // Same speaker → "Person N" map the .txt path uses, so the two outputs
         // label identically. Empty when not anonymizing (lookups fall through).
         let aliases = anonymize ? anonymizationMap(for: records) : [:]
@@ -820,11 +970,11 @@ public enum Transcript {
             guard let body = Self.renderedBody(of: r, redactions: redactions, aliases: aliases)
             else { continue }
             var fields: [(String, String)] = [
-                ("d", jsonString(full.string(from: r.date))),
+                ("d", jsonString(local.stamp(r.date))),
                 ("s", jsonString(aliases[r.speaker] ?? r.speaker)),
                 ("m", jsonString(body)),
             ]
-            if let svc = r.service, svc != "iMessage" {
+            if let svc = r.service.flatMap(serviceLabel) {
                 fields.append(("svc", jsonString(svc)))
             }
             if !r.reactions.isEmpty {
@@ -838,6 +988,15 @@ public enum Transcript {
             out += "{" + fields.map { "\"\($0.0)\": \($0.1)" }.joined(separator: ", ") + "}\n"
         }
         return out
+    }
+
+    /// A plain label for `message.service`, or nil for iMessage (the default).
+    static func serviceLabel(_ service: String) -> String? {
+        switch service {
+        case "iMessage", "": nil
+        case "iMessageLite": "iMessage via satellite"
+        default: service
+        }
     }
 
     /// JSON string literal matching Python json.dumps(ensure_ascii=False):

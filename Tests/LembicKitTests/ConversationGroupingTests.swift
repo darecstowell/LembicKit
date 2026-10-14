@@ -24,10 +24,12 @@ struct ConversationGroupingTests {
             [
                 summary(1, "+18160000000", 3, date: 100, count: 4),
                 summary(2, "a@b.com", 7, date: 200, count: 6),
-            ], contacts: aliceContacts)
+            ], contacts: aliceContacts,
+            contactIDs: ["+18160000000": "card-alice", "a@b.com": "card-alice"])
         #expect(union.count == 1, "phone + email under one contact → one Conversation")
         if let alice = union.first {
-            #expect(alice.id == "Alice", "union id is the resolved contact name")
+            #expect(alice.id == "chat:rowid:1", "union id is the smallest chat key")
+            #expect(alice.legacyIDs.contains("Alice"), "the 0.3.1 id (the name) is kept")
             #expect(alice.displayName == "Alice", "union displayName is the contact name")
             #expect(alice.isContact, "resolved contact → isContact true")
             #expect(alice.chatIDs == [1, 2], "union chatIDs = both rows")
@@ -37,6 +39,22 @@ struct ConversationGroupingTests {
                 alice.identifiers == ["+18160000000", "a@b.com"],
                 "identifiers contains both normalized union members")
         }
+    }
+
+    @Test func twoCardsWithOneNameStayApart() {
+        let rows = [
+            summary(1, "+15555550102", 2, date: 100, count: 2),
+            summary(2, "+15555550103", 3, date: 200, count: 2),
+        ]
+        let names = ["+15555550102": "Mike", "+15555550103": "Mike"]
+        let split = Conversations.group(
+            rows, contacts: names,
+            contactIDs: ["+15555550102": "card-plumber", "+15555550103": "card-coworker"])
+        #expect(split.count == 2, "two Contacts cards are two people")
+        #expect(split.allSatisfy { $0.displayName == "Mike" && $0.isContact })
+        #expect(Set(split.map(\.targetHandles)) == [[2], [3]])
+        let nameOnly = Conversations.group(rows, contacts: names)
+        #expect(nameOnly.count == 2, "a name alone never joins two handles")
     }
 
     @Test func unknownNumbersStandAlone() {
@@ -54,8 +72,8 @@ struct ConversationGroupingTests {
                 && strangers.contains { $0.displayName == "+18162222222" },
             "displayName is the raw normalized identifier (engine never pretty-prints)")
         #expect(
-            strangers.allSatisfy { $0.id == $0.displayName },
-            "unknown number: id == its normalized identifier")
+            strangers.allSatisfy { $0.legacyIDs == [$0.displayName] },
+            "unknown number: the 0.3.1 id is its normalized identifier")
     }
 
     @Test func recencyOrdering() {
@@ -67,9 +85,10 @@ struct ConversationGroupingTests {
                 summary(21, "b@b.com", 22, date: 500),  // newest in Bob's union
                 summary(22, "+18164444444", 23, date: 300),  // a separate, mid-date person
             ],
-            contacts: ["+18163333333": "Bob", "b@b.com": "Bob"])
+            contacts: ["+18163333333": "Bob", "b@b.com": "Bob"],
+            contactIDs: ["+18163333333": "card-bob", "b@b.com": "card-bob"])
         #expect(recency.count == 2, "Bob's two identifiers union; the stranger stands alone")
-        if let bob = recency.first(where: { $0.id == "Bob" }) {
+        if let bob = recency.first(where: { $0.displayName == "Bob" }) {
             #expect(
                 bob.primaryIdentifier == "b@b.com",
                 "primaryIdentifier = the newest row's normalized identifier")
@@ -78,7 +97,7 @@ struct ConversationGroupingTests {
                 "lastMessageDate = the newest row's date")
         }
         #expect(
-            recency.first?.id == "Bob",
+            recency.first?.displayName == "Bob",
             "newest-first: Bob (last @500) sorts above the stranger (@300)")
     }
 

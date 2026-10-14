@@ -1,8 +1,7 @@
-# iMessage transcript
+# Messages transcript
 # 2023-11-14 → 2023-11-15 · 4 messages · 1 reactions · 0 with attachments
 # Speakers: Person 1 (P1), Person 2 (P2) — names anonymized.
 # Reactions shown as [PN: ❤️] after the message they target.
-# Attachments shown as typed placeholders: [photo] [video] [gif] [audio] [pdf] [contact] [shared location].
 # Times are local, 24h. Section headers are calendar days.
 
 

@@ -148,6 +148,7 @@ extension Export {
     ///   already treats as "empty scope," not "error.")
     /// - `records` is the in-range record set, so a caller can size a meter /
     ///   reconcile counts without re-extracting.
+    /// - `skipped` is the in-range rows the extractor read but could not show.
     public struct Rendered: Sendable {
         public let txt: String?
         public let jsonl: String?
@@ -155,6 +156,7 @@ extension Export {
         public let detected: [DetectedSecret]
         public let records: [MessageRecord]
         public let messageCount: Int
+        public let skipped: [SkippedMessage]
 
         public init(
             txt: String?,
@@ -162,7 +164,8 @@ extension Export {
             result: Transcript.RenderResult?,
             detected: [DetectedSecret],
             records: [MessageRecord],
-            messageCount: Int
+            messageCount: Int,
+            skipped: [SkippedMessage] = []
         ) {
             self.txt = txt
             self.jsonl = jsonl
@@ -170,6 +173,7 @@ extension Export {
             self.detected = detected
             self.records = records
             self.messageCount = messageCount
+            self.skipped = skipped
         }
     }
 
@@ -212,8 +216,8 @@ extension Export {
     ) throws -> Rendered {
         let labels = try resolvedLabels(resolveContacts: resolveContacts)
         let extractor = Extractor.forConversation(conversation, globalLabels: labels)
-        let records = try database.read { db in
-            try extractor.extractConversation(db, chatIDs: conversation.chatIDs)
+        let extraction = try database.read { db in
+            try extractor.extract(db, chatIDs: conversation.chatIDs)
         }
         // System events are opt-in (off by default) and group-only; extract them
         // only when both hold, so the default path never reads the extra columns.
@@ -226,9 +230,10 @@ extension Export {
             systemEvents = []
         }
         return Export.render(
-            records: records, number: conversation.primaryIdentifier,
+            records: extraction.records, number: conversation.primaryIdentifier,
             formats: formats, scope: scope, redactions: redactions, detect: detect,
-            group: Export.groupRenderInfo(for: conversation), systemEvents: systemEvents)
+            group: Export.groupRenderInfo(for: conversation), systemEvents: systemEvents,
+            skipped: extraction.skipped, noteToSelf: conversation.isNoteToSelf)
     }
 
     /// The `Transcript.GroupRenderInfo` for a group conversation (the roster
@@ -243,13 +248,16 @@ extension Export {
         for conversation: Conversation
     ) -> Transcript.GroupRenderInfo? {
         guard conversation.isGroup else { return nil }
-        let labels = conversation.participants.map { $0.label ?? $0.identifier }
+        let current = conversation.participants.filter { !$0.isFormer }
+        let labels = current.map { $0.label ?? $0.identifier }
+        let former = conversation.participants.filter(\.isFormer).map { $0.label ?? $0.identifier }
         // A degenerate group with an empty roster has no labels to join, so fall
         // back to the conversation's (already non-empty) displayName so the
-        // `# iMessage group transcript:` header is never blank.
+        // `# Messages group transcript:` header is never blank.
         let joined = labels.joined(separator: ", ")
         let name = conversation.groupName ?? (joined.isEmpty ? conversation.displayName : joined)
-        return Transcript.GroupRenderInfo(name: name, participantLabels: labels)
+        return Transcript.GroupRenderInfo(
+            name: name, participantLabels: labels, formerLabels: former)
     }
 
     /// The scope-filtered record set — the exact slice `render` feeds the
@@ -334,7 +342,8 @@ extension Export {
                     MessageRecord(
                         guid: record.guid, date: record.date, speaker: speaker,
                         isTarget: record.isTarget, service: record.service, text: text,
-                        hadAttachment: record.hadAttachment, reactions: reactions))
+                        hadAttachment: record.hadAttachment, reactions: reactions,
+                        flags: record.flags))
             }
         }
         return out
@@ -425,7 +434,8 @@ extension Export {
                     MessageRecord(
                         guid: record.guid, date: record.date, speaker: record.speaker,
                         isTarget: record.isTarget, service: record.service, text: body,
-                        hadAttachment: record.hadAttachment, reactions: record.reactions))
+                        hadAttachment: record.hadAttachment, reactions: record.reactions,
+                        flags: record.flags))
             }
         }
         return out
@@ -446,11 +456,17 @@ extension Export {
         redactions: RedactionSet = RedactionSet(),
         detect: Bool = true,
         group: Transcript.GroupRenderInfo? = nil,
-        systemEvents: [Transcript.SystemEvent] = []
+        systemEvents: [Transcript.SystemEvent] = [],
+        skipped: [SkippedMessage] = [],
+        noteToSelf: Bool = false
     ) -> Rendered {
         // (1) Filter to the scope's date window (nil = full history) — the single
         // filtering path, shared with the public `records(_:scope:)` accessor.
         let filtered = Self.records(records, scope: scope)
+        let scopedSkips =
+            scope.dateRange.map { range in
+                skipped.filter { $0.date.map(range.contains) ?? false }
+            } ?? skipped
 
         // Empty scope → empty strings + nil result (the caller's existing
         // "nil RenderResult is the empty render" contract).
@@ -458,7 +474,7 @@ extension Export {
             return Rendered(
                 txt: formats.contains(.txt) ? "" : nil,
                 jsonl: formats.contains(.jsonl) ? "" : nil,
-                result: nil, detected: [], records: [], messageCount: 0)
+                result: nil, detected: [], records: [], messageCount: 0, skipped: scopedSkips)
         }
 
         // (2) Detect over the FILTERED set — cheap, pure, idempotent. Honor the
@@ -495,7 +511,7 @@ extension Export {
                 records: filtered, number: number, trim: scope.trim,
                 redactions: effectiveRedactions, detected: detected,
                 anonymize: scope.anonymizeSpeakers, group: group,
-                systemEvents: scopedEvents)
+                systemEvents: scopedEvents, noteToSelf: noteToSelf)
             txt = rendered.text
             result = rendered
         }
@@ -507,6 +523,6 @@ extension Export {
 
         return Rendered(
             txt: txt, jsonl: jsonl, result: result, detected: detected,
-            records: filtered, messageCount: filtered.count)
+            records: filtered, messageCount: filtered.count, skipped: scopedSkips)
     }
 }

@@ -5,9 +5,10 @@ import Foundation
 /// resolved speaker label (first name / `First L.` / formatted number) is left
 /// nil here — the label layer's helper fills it from a Contacts map; the grouping
 /// layer only stashes the raw roster so the grouping stays Contacts-free and
-/// unit-testable. "Me" is never a participant (it isn't in `chat_handle_join`).
+/// unit-testable. "Me" is never a participant: the owner's own handles are kept
+/// out of the roster (see `Conversation.ownerHandles`).
 public struct Participant: Sendable, Equatable {
-    /// The participant's handle ROWID — the key `Extractor.label` resolves.
+    /// The participant's main handle ROWID (their most active one in the group).
     public let handleID: Int64
     /// The normalized identifier (E.164 phone / lowercased email), or `h<id>`
     /// when the handle string is unknown. The human-readable counterpart to
@@ -16,11 +17,34 @@ public struct Participant: Sendable, Equatable {
     /// The resolved speaker label (the label layer fills this: first name /
     /// `First L.` / formatted number). Nil at the raw-roster grouping layer.
     public var label: String?
+    /// Every handle ROWID of this person in the group (email and phone, or one
+    /// number on iMessage, SMS, and RCS). Always contains `handleID`.
+    public let handleIDs: Set<Int64>
+    /// The person identity the stitch compares, the same across handles.
+    let personKey: String
+    /// True for someone who wrote in the group, or was added or removed, but is
+    /// no longer in its member list. The header shows them as "(left)".
+    public var isFormer: Bool
 
-    public init(handleID: Int64, identifier: String, label: String? = nil) {
+    public init(
+        handleID: Int64, identifier: String, label: String? = nil, handleIDs: Set<Int64> = [],
+        isFormer: Bool = false
+    ) {
+        self.init(
+            handleID: handleID, identifier: identifier, label: label, handleIDs: handleIDs,
+            personKey: identifier, isFormer: isFormer)
+    }
+
+    init(
+        handleID: Int64, identifier: String, label: String?, handleIDs: Set<Int64>,
+        personKey: String, isFormer: Bool = false
+    ) {
         self.handleID = handleID
         self.identifier = identifier
         self.label = label
+        self.handleIDs = handleIDs.union([handleID])
+        self.personKey = personKey
+        self.isFormer = isFormer
     }
 }
 
@@ -43,10 +67,18 @@ public struct Participant: Sendable, Equatable {
 /// are UI concerns a caller layers on (e.g. reading `avatars[identifier]` from
 /// `ContactsMap.ContactInfo` and pretty-printing bare numbers itself).
 public struct Conversation: Identifiable, Sendable, Equatable {
-    /// Stable key: the resolved contact name when known (so a person's phone +
-    /// email chats share one id), else the normalized identifier (each unknown
-    /// number stands alone).
+    /// Stable key: `chat:` plus the smallest of `chatGUIDs`. A rename, a Contacts
+    /// change, or a member change does not move it. When chats regroup, the new
+    /// conversation keeps the id of one of its chats; see `chatGUIDs`.
     public let id: String
+    /// Every key 0.3.1 could have used as `id` for this conversation (contact
+    /// name, bare identifiers, `group:<handle ROWIDs>`). Migration only: two
+    /// conversations can share one.
+    public let legacyIDs: Set<String>
+    /// The `chat.guid` of every chat in the union (`rowid:<ROWID>` when the column
+    /// is missing). Saved state keyed `chat:<g>` for any `g` here belongs to this
+    /// conversation.
+    public let chatGUIDs: Set<String>
     /// Display label: the resolved contact name, else the normalized identifier
     /// (raw E.164 / email — the engine does NOT pretty-print; that's a UI concern).
     public let displayName: String
@@ -84,6 +116,13 @@ public struct Conversation: Identifiable, Sendable, Equatable {
     /// the composed name is the label layer's and the picker's job). Always nil for
     /// a 1:1.
     public let groupName: String?
+    /// The oldest real message across the union, when known.
+    public let firstMessageDate: Date?
+    /// Handles in this conversation that belong to the owner (a second number or
+    /// email). Their messages label as "Me", and they are never participants.
+    public let ownerHandles: Set<Int64>
+    /// A 1:1 with the owner's own address (notes to self).
+    public let isNoteToSelf: Bool
 
     public init(
         id: String,
@@ -97,9 +136,19 @@ public struct Conversation: Identifiable, Sendable, Equatable {
         isContact: Bool,
         isGroup: Bool = false,
         participants: [Participant] = [],
-        groupName: String? = nil
+        groupName: String? = nil,
+        legacyIDs: Set<String> = [],
+        chatGUIDs: Set<String> = [],
+        firstMessageDate: Date? = nil,
+        ownerHandles: Set<Int64> = [],
+        isNoteToSelf: Bool = false
     ) {
+        self.ownerHandles = ownerHandles
+        self.isNoteToSelf = isNoteToSelf
         self.id = id
+        self.legacyIDs = legacyIDs
+        self.chatGUIDs = chatGUIDs
+        self.firstMessageDate = firstMessageDate
         self.displayName = displayName
         self.chatIDs = chatIDs
         self.targetHandles = targetHandles
@@ -118,10 +167,10 @@ public struct Conversation: Identifiable, Sendable, Equatable {
 /// default is `.exact` — the only behavior that ever shipped — so a caller that
 /// doesn't opt in gets byte-identical output to the exact-set pass.
 ///
-/// - `.exact`: rows merge **only** when their sorted participant-handle-set is
-///   identical (the raw-roster grouping). A membership change (someone
-///   added/removed) is a different set and stays a separate `Conversation`. This
-///   is deterministic and has no false-merge risk.
+/// - `.exact`: rows merge only when they hold the same people (a person's email,
+///   phone, SMS, and RCS handles count as one) and their names do not conflict,
+///   or when Apple links them (`chat.group_id`, `chat_lookup`). A membership
+///   change is a different roster and stays a separate `Conversation`.
 /// - `.fuzzy`: an **opt-in, heuristic** second pass over the exact-set groups
 ///   that additionally merges groups whose rosters look like the *same group with
 ///   changed membership* (members added/removed over time). Approximate by
@@ -152,21 +201,33 @@ public enum Conversations {
     /// default) stitches only identical participant-sets — byte-identical to what
     /// always shipped. `.fuzzy` additionally runs the opt-in membership-change
     /// merge over the exact-set groups; 1:1 conversations are untouched either way.
+    ///
+    /// `contactIDs` (`ContactsMap.ContactInfo.contactIDs`) says which handles share
+    /// one Contacts card. Without it, a name alone never joins two handles.
+    /// `ownerIdentifiers` (`ContactInfo.ownerIdentifiers`) adds the Me card's
+    /// handles to the owner addresses read from the database.
+    /// `region` completes numbers stored without a country code.
     public static func list(
         from db: ChatDatabase,
         resolvingContacts: Bool = true,
         contacts: [String: String]? = nil,
-        stitch: GroupStitch = .exact
+        contactIDs: [String: String]? = nil,
+        ownerIdentifiers: Set<String> = [],
+        stitch: GroupStitch = .exact,
+        region: String = ContactsMap.currentRegion()
     ) throws -> [Conversation] {
         let summaries = try db.conversationSummaries()
-        let names: [String: String]
+        var names: [String: String]
+        var cards = contactIDs ?? [:]
+        var owner = ownerIdentifiers
         if let contacts {
             names = contacts
         } else if resolvingContacts {
-            // Contacts is optional: resolve names when granted,
-            // else fall back to identifiers. A denial must never throw out of the
-            // list path.
-            names = (try? ContactsMap.buildContactInfo().names) ?? [:]
+            // Contacts is optional: a denial falls back to identifiers, never throws.
+            let info = try? ContactsMap.buildContactInfo(region: region)
+            names = info?.names ?? [:]
+            if contactIDs == nil { cards = info?.contactIDs ?? [:] }
+            owner.formUnion(info?.ownerIdentifiers ?? [])
         } else {
             names = [:]
         }
@@ -179,9 +240,22 @@ public enum Conversations {
         let handleLabels = try db.handleLabels()
         let handlesByIdentifier = Dictionary(
             grouping: handleLabels,
-            by: { ContactsMap.normalizeHandle($0.value) }
+            by: { ContactsMap.normalizeHandle($0.value, defaultRegion: region) }
         ).mapValues { Set($0.map(\.key)) }
-        let oneToOnes = group(summaries, contacts: names, handlesByIdentifier: handlesByIdentifier)
+        (names, cards) = ContactsMap.withNationalFallback(
+            names: names, contactIDs: cards,
+            handles: Array(handlesByIdentifier.keys)
+                + summaries.compactMap(\.identifier).map {
+                    ContactsMap.normalizeHandle($0, defaultRegion: region)
+                })
+        let groupSummaries = try db.groupConversationSummaries()
+        owner.formUnion(
+            ownerAddresses(
+                seen: summaries.map(\.ownerIdentifiers) + groupSummaries.map(\.ownerIdentifiers),
+                region: region))
+        let oneToOnes = group(
+            summaries, contacts: names, contactIDs: cards,
+            handlesByIdentifier: handlesByIdentifier, owner: owner, region: region)
 
         // Group chats (style=43): exact-participant-set stitched, then merged into
         // the same recency-sorted list. handleLabels lets the roster carry each
@@ -189,11 +263,14 @@ public enum Conversations {
         // `participantCounts` (one grouped query, this session) orders each
         // roster most-active-first — summed across a fork's chatIDs
         // in memory, never per row.
-        let groupSummaries = try db.groupConversationSummaries()
         let participantCounts = try db.groupParticipantMessageCounts()
+        let people = personKeys(
+            handleLabels: handleLabels, personCentricIDs: try db.personCentricIDs(),
+            contactIDs: cards, region: region)
         var groups = groupGroups(
             groupSummaries, handleLabels: handleLabels, names: names,
-            participantCounts: participantCounts)
+            participantCounts: participantCounts, personKeys: people,
+            chatLinks: try db.groupChatLinks(), owner: owner, region: region)
 
         // The opt-in fuzzy merge: a conservative second pass that merges exact-set
         // groups representing the same group with changed membership. `.exact` (the
@@ -220,23 +297,43 @@ public enum Conversations {
         return try list(from: db, resolvingContacts: resolvingContacts)
     }
 
+    /// The owner's addresses from `destination_caller_id`: an address counts only
+    /// when the owner sent from it in two or more chats, so one odd row can never
+    /// turn another person into "Me".
+    public static func ownerAddresses(
+        seen perChat: [Set<String>], region: String = ContactsMap.defaultRegion
+    ) -> Set<String> {
+        var chats: [String: Int] = [:]
+        for addresses in perChat {
+            let normalized = Set(
+                addresses.map { ContactsMap.normalizeHandle($0, defaultRegion: region) })
+            for address in normalized { chats[address, default: 0] += 1 }
+        }
+        return Set(chats.filter { $0.value >= 2 }.keys)
+    }
+
     // MARK: - 1:1 multi-identifier union
 
     /// Pure grouping: fold raw per-chat summaries into people. No DB, no Contacts
-    /// I/O — `contacts` is the normalized-handle → name map (empty ⇒ every chat
-    /// stands alone as a bare identifier). Keyed by resolved contact name when
-    /// known (so phone + email merge), else by the normalized identifier (each
-    /// unknown number stands alone). Newest conversation first. This is the
-    /// engine's multi-identifier union and the unit-test seam.
+    /// I/O — `contacts` is the normalized-handle → name map, used for display only.
+    /// Keyed by Contacts card (`contactIDs`, so one card's phone + email merge),
+    /// else by the normalized identifier. Two cards with the same name stay two
+    /// conversations. Newest conversation first. This is the unit-test seam.
+    /// A conversation whose identifiers are all in `owner` is a note to self.
     public static func group(
         _ summaries: [ChatDatabase.ConversationSummary],
         contacts: [String: String],
-        handlesByIdentifier: [String: Set<Int64>] = [:]
+        contactIDs: [String: String] = [:],
+        handlesByIdentifier: [String: Set<Int64>] = [:],
+        owner: Set<String> = [],
+        region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
         struct Acc {
             var chatIDs = Set<Int64>()
+            var chatKeys = Set<String>()
             var handles = Set<Int64>()
             var identifiers = Set<String>()
+            var legacy = Set<String>()
             var last = Date.distantPast
             var count = 0
             var name: String?
@@ -245,13 +342,15 @@ public enum Conversations {
         var groups: [String: Acc] = [:]
         for s in summaries {
             let ident = s.identifier ?? "h\(s.handleID)"
-            let norm = ContactsMap.normalizeHandle(ident)
+            let norm = ContactsMap.normalizeHandle(ident, defaultRegion: region)
             let name = contacts[norm]
-            let key = name ?? norm
+            let key = contactIDs[norm].map { "card:" + $0 } ?? norm
             var acc = groups[key] ?? Acc()
             acc.chatIDs.insert(s.chatID)
+            acc.chatKeys.insert(chatKey(guid: s.guid, chatID: s.chatID))
             acc.handles.insert(s.handleID)
             acc.identifiers.insert(norm)
+            acc.legacy.insert(legacyHandleKey(ident))
             acc.count += s.messageCount
             acc.name = acc.name ?? name
             if s.lastMessageDate >= acc.last {
@@ -262,7 +361,7 @@ public enum Conversations {
         }
         return
             groups
-            .map { key, a in
+            .map { _, a in
                 // Claim every handle ROWID sharing one of this person's normalized
                 // identifiers — not just the one each chat registered — so all of
                 // the counterparty's messages label as "Them". Without this, a
@@ -271,143 +370,279 @@ public enum Conversations {
                 var handles = a.handles
                 for id in a.identifiers { handles.formUnion(handlesByIdentifier[id] ?? []) }
                 return Conversation(
-                    id: key,
-                    displayName: a.name ?? key,
+                    id: stableID(a.chatKeys),
+                    displayName: a.name ?? a.number,
                     chatIDs: a.chatIDs,
                     targetHandles: handles,
                     identifiers: a.identifiers,
                     lastMessageDate: a.last,
                     messageCount: a.count,
-                    primaryIdentifier: a.number.isEmpty ? key : a.number,
-                    isContact: a.name != nil)
+                    primaryIdentifier: a.number,
+                    isContact: a.name != nil,
+                    legacyIDs: a.identifiers.union(a.legacy).union(a.name.map { [$0] } ?? []),
+                    chatGUIDs: a.chatKeys,
+                    isNoteToSelf: !a.identifiers.isEmpty && a.identifiers.isSubset(of: owner))
             }
             .sorted { $0.lastMessageDate > $1.lastMessageDate }
     }
 
     // MARK: - Group exact-set stitch
 
-    /// Pure exact-participant-set grouping for group chats — the
-    /// group-side mirror of `group`. No DB, no Contacts I/O; this is the unit-test
-    /// seam. `handleLabels` (handle ROWID → raw phone/email) resolves each
-    /// roster member's normalized identifier.
+    /// Pure group stitching. No DB, no Contacts I/O; this is the unit-test seam.
+    /// `handleLabels` (handle ROWID to raw phone/email) gives each member's
+    /// normalized identifier, and `names` (normalized handle to contact name) fills
+    /// `Participant.label` (pass `[:]` to leave labels nil).
     ///
-    /// `names` (the `ContactsMap.buildContactInfo().names` map, keyed by normalized
-    /// handle) fills each `Participant.label` with its resolved group-speaker label
-    /// (first name / `First L.` / formatted number). Pass `[:]` to leave labels
-    /// nil (the raw-roster behavior — the grouping stays Contacts-free).
+    /// Chats join when they hold the same people and their names agree: one has
+    /// no name, or both have the same name after trimming and case folding. A
+    /// person is `personKeys[handle]` (see `personKeys(handleLabels:...)`), else the
+    /// normalized identifier, so one number on iMessage, SMS, and RCS is one
+    /// person. When one roster has two or more names, its unnamed chats stay
+    /// apart, because there is no way to tell which group they belong to.
+    /// Chats that share `groupID` or a `chatLinks` key also join, unless their
+    /// names conflict. Two different names never end up in one conversation.
     ///
-    /// Forks that share an **identical** sorted participant-handle-set merge into
-    /// one `Conversation` (collect all their `chatIDs`; `lastMessageDate` = max,
-    /// `messageCount` = Σ) — extraction then unions + ROWID-dedupes their messages.
-    /// A membership change (someone added/removed) is a *different* set, so it
-    /// stays a separate entry. Newest conversation first; the caller re-sorts the
-    /// merged 1:1-plus-group list, so ordering here is only a stable convenience.
-    ///
-    /// `participantCounts` (`chatID → (handleID → real-message count)`, from
-    /// `ChatDatabase.groupParticipantMessageCounts()`) orders each group's roster
-    /// **most-active-first**: a participant's volume is summed across
-    /// the stitched fork's chatIDs, and `participants` is sorted by descending
-    /// total, ties (incl. silent 0-message members absent from the map) broken by
-    /// the normalized identifier so the order stays deterministic. Pass `[:]` to
-    /// keep the raw handle-ROWID order (the unit-test default — order isn't
-    /// asserted there).
+    /// `participantCounts` (`chatID → (handleID → real-message count)`) orders the
+    /// roster most active first; ties break on the identifier. A handle in it that
+    /// is not in `chat_handle_join` is a former member. Handles whose normalized
+    /// identifier is in `owner` are the owner's, never members.
     public static func groupGroups(
         _ summaries: [ChatDatabase.GroupConversationSummary],
         handleLabels: [Int64: String] = [:],
         names: [String: String] = [:],
-        participantCounts: [Int64: [Int64: Int]] = [:]
+        participantCounts: [Int64: [Int64: Int]] = [:],
+        personKeys: [Int64: String] = [:],
+        chatLinks: [Int64: Set<String>] = [:],
+        owner: Set<String> = [],
+        region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
-        struct Acc {
-            var chatIDs = Set<Int64>()
-            var handleSet: [Int64] = []  // the sorted set key (shared by the fork)
-            var last = Date.distantPast
-            var count = 0
-            var groupName: String?
-            var primaryIdentifier = ""
+        func identifier(_ handle: Int64) -> String {
+            handleLabels[handle].map { ContactsMap.normalizeHandle($0, defaultRegion: region) }
+                ?? "h\(handle)"
         }
-        // Key by the sorted participant-handle-set so forks collapse. An empty
-        // roster (a degenerate group with no joined handles) keys on "" and stands
-        // alone rather than colliding with other empty-roster rows by accident —
-        // tag it with the chatID so each stays distinct.
-        var groups: [String: Acc] = [:]
-        for s in summaries {
-            let handles = s.participantHandles  // already sorted by the enumerator
-            let key =
-                handles.isEmpty
-                ? "empty:\(s.chatID)"
-                : handles.map(String.init).joined(separator: ",")
-            var acc = groups[key] ?? Acc()
-            acc.chatIDs.insert(s.chatID)
-            acc.handleSet = handles
-            acc.count += s.messageCount
-            // Keep the first non-nil display name across the fork (a re-created
-            // group usually carries the same name; prefer a name to nil).
-            acc.groupName = acc.groupName ?? s.displayName
-            if s.lastMessageDate >= acc.last {
-                acc.last = s.lastMessageDate
-                acc.primaryIdentifier = s.identifier ?? "group\(s.chatID)"
-            }
-            groups[key] = acc
+        func person(_ handle: Int64) -> String { personKeys[handle] ?? identifier(handle) }
+        func isOwner(_ handle: Int64) -> Bool {
+            owner.contains(identifier(handle)) || owner.contains(person(handle))
         }
-        return
-            groups
-            .map { _, a in
-                // Sum each member's real-message volume across the stitched fork's
-                // chatIDs, then order the roster most-active-first.
-                // Silent members (no count row) sit at 0 and fall to the end; ties
-                // break on the normalized identifier so the order is deterministic.
-                let totals: [Int64: Int] = a.chatIDs.reduce(into: [:]) { acc, cid in
-                    for (hid, n) in participantCounts[cid] ?? [:] { acc[hid, default: 0] += n }
-                }
-                let ordered = a.handleSet.map { hid -> Participant in
-                    let ident =
-                        handleLabels[hid].map { ContactsMap.normalizeHandle($0) } ?? "h\(hid)"
-                    return Participant(handleID: hid, identifier: ident)
-                }
-                .sorted { lhs, rhs in
-                    let lc = totals[lhs.handleID] ?? 0
-                    let rc = totals[rhs.handleID] ?? 0
-                    if lc != rc { return lc > rc }
-                    return lhs.identifier < rhs.identifier
-                }
-                var participants = ordered
-                // Fill each member's resolved speaker label when a Contacts
-                // name map is supplied — the single source the roster header,
-                // the picker's composed name, and group extraction all read.
-                // An empty `names` map means "no resolution requested" → leave the
-                // labels nil (the raw-roster contract; the change stays additive).
-                if !names.isEmpty {
-                    let byHandle = groupSpeakerLabels(participants: participants, names: names)
-                    for i in participants.indices {
-                        participants[i].label = byHandle[participants[i].handleID]
-                    }
-                }
-                let identifiers = Set(participants.map(\.identifier))
-                // Display name: the group's display_name when named, else a stable
-                // placeholder (the composed first-3-names name is the label layer's
-                // and the picker's job — the grouping layer only needs something
-                // non-empty + deterministic).
-                // A degenerate group with an EMPTY roster (no joined handles, no
-                // display_name) would otherwise join to "" — fall back to the
-                // group's primary identifier (guid / `group<chatID>`) so neither the
-                // picker row nor the `# iMessage group transcript:` header is blank.
-                let rosterName = identifiers.sorted().joined(separator: ", ")
-                let display = a.groupName ?? (rosterName.isEmpty ? a.primaryIdentifier : rosterName)
-                return Conversation(
-                    id: "group:" + a.handleSet.map(String.init).joined(separator: ","),
-                    displayName: display,
-                    chatIDs: a.chatIDs,
-                    targetHandles: Set(a.handleSet),
-                    identifiers: identifiers,
-                    lastMessageDate: a.last,
-                    messageCount: a.count,
-                    primaryIdentifier: a.primaryIdentifier,
-                    isContact: false,
-                    isGroup: true,
-                    participants: participants,
-                    groupName: a.groupName)
+
+        let rows = summaries.sorted { $0.chatID < $1.chatID }
+        var components = NameAwareUnion(names: rows.map { normalizedGroupName($0.displayName) })
+
+        // Same people: one bucket per roster, split by name when the names conflict.
+        var buckets: [[String]: [Int]] = [:]
+        for (i, row) in rows.enumerated() {
+            let people = Set(row.participantHandles.filter { !isOwner($0) }.map(person)).sorted()
+            if !people.isEmpty { buckets[people, default: []].append(i) }
+        }
+        for key in buckets.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            let members = buckets[key] ?? []
+            let named = Dictionary(grouping: members.filter { components.name(of: $0) != nil }) {
+                components.name(of: $0) ?? ""
             }
-            .sorted { $0.lastMessageDate > $1.lastMessageDate }
+            let unnamed = members.filter { components.name(of: $0) == nil }
+            let parts = named.count <= 1 ? [members] : Array(named.values) + [unnamed]
+            for part in parts { for j in part.dropFirst() { components.union(part[0], j) } }
+        }
+
+        // Apple's links: a shared group_id or chat_lookup identifier.
+        var linked: [String: [Int]] = [:]
+        for (i, row) in rows.enumerated() {
+            var keys = chatLinks[row.chatID] ?? []
+            if let groupID = row.groupID?.trimmingCharacters(in: .whitespaces), !groupID.isEmpty {
+                keys.insert("group_id:" + groupID)
+            }
+            for key in keys { linked[key, default: []].append(i) }
+        }
+        for key in linked.keys.sorted() {
+            let members = linked[key] ?? []
+            for j in members.dropFirst() { components.union(members[0], j) }
+        }
+
+        return components.groups().map { members in
+            buildGroup(
+                members.map { rows[$0] }, identifier: identifier, person: person,
+                isOwner: isOwner, names: names, participantCounts: participantCounts)
+        }
+        .sorted { $0.lastMessageDate > $1.lastMessageDate }
+    }
+
+    /// One stitched group conversation from its chats.
+    private static func buildGroup(
+        _ chats: [ChatDatabase.GroupConversationSummary],
+        identifier: (Int64) -> String,
+        person: (Int64) -> String,
+        isOwner: (Int64) -> Bool,
+        names: [String: String],
+        participantCounts: [Int64: [Int64: Int]]
+    ) -> Conversation {
+        let byRecency = chats.sorted {
+            ($0.lastMessageDate, $0.chatID) > ($1.lastMessageDate, $1.chatID)
+        }
+        let latest = byRecency[0]
+        let primaryIdentifier = latest.identifier ?? "group\(latest.chatID)"
+        let groupName = byRecency.compactMap(\.displayName).first { !$0.isEmpty }
+        let chatIDs = Set(chats.map(\.chatID))
+
+        var totals: [Int64: Int] = [:]
+        for chatID in chatIDs {
+            for (handle, n) in participantCounts[chatID] ?? [:] { totals[handle, default: 0] += n }
+        }
+        let listed = Set(chats.flatMap(\.participantHandles))
+        let seen = listed.union(totals.keys)
+        let ownerHandles = seen.filter(isOwner)
+        let allHandles = seen.subtracting(ownerHandles)
+        var handlesByPerson: [String: Set<Int64>] = [:]
+        for handle in allHandles { handlesByPerson[person(handle), default: []].insert(handle) }
+        var participants = handlesByPerson.map { key, handles in
+            var p = makeParticipant(
+                key: key, handles: handles, totals: totals, identifier: identifier, names: names)
+            p.isFormer = handles.isDisjoint(with: listed)
+            return p
+        }
+        sortRoster(&participants, totals: totals)
+        relabel(&participants, names: names)
+
+        let rosterName = participants.filter { !$0.isFormer }.map(\.identifier).sorted()
+            .joined(separator: ", ")
+        // An empty roster with no name falls back to the chat identifier, never "".
+        let display = groupName ?? (rosterName.isEmpty ? primaryIdentifier : rosterName)
+        let chatKeys = Set(chats.map { chatKey(guid: $0.guid, chatID: $0.chatID) })
+        return Conversation(
+            id: stableID(chatKeys),
+            displayName: display,
+            chatIDs: chatIDs,
+            targetHandles: allHandles,
+            identifiers: Set(allHandles.map(identifier)),
+            lastMessageDate: latest.lastMessageDate,
+            messageCount: chats.reduce(0) { $0 + $1.messageCount },
+            primaryIdentifier: primaryIdentifier,
+            isContact: false,
+            isGroup: true,
+            participants: participants,
+            groupName: groupName,
+            legacyIDs: Set(chats.map { legacyGroupID($0.participantHandles) })
+                .union([legacyGroupID(listed)]),
+            chatGUIDs: chatKeys,
+            firstMessageDate: chats.compactMap(\.firstMessageDate).min(),
+            ownerHandles: ownerHandles)
+    }
+
+    /// One person: their most active handle leads, and the identifier is one that
+    /// resolves to a contact name when any does.
+    private static func makeParticipant(
+        key: String, handles: Set<Int64>, totals: [Int64: Int],
+        identifier: (Int64) -> String, names: [String: String]
+    ) -> Participant {
+        let lead = handles.min { lhs, rhs in
+            let (l, r) = (totals[lhs] ?? 0, totals[rhs] ?? 0)
+            return l != r ? l > r : lhs < rhs
+        }!
+        let candidates = [identifier(lead), key] + handles.map(identifier).sorted()
+        let ident = candidates.first { names[$0] != nil } ?? identifier(lead)
+        return Participant(
+            handleID: lead, identifier: ident, label: nil, handleIDs: handles, personKey: key)
+    }
+
+    /// Current members first, then most active (summed over the person's handles),
+    /// then by identifier.
+    private static func sortRoster(_ roster: inout [Participant], totals: [Int64: Int]) {
+        func volume(_ p: Participant) -> Int { p.handleIDs.reduce(0) { $0 + (totals[$1] ?? 0) } }
+        roster.sort { lhs, rhs in
+            if lhs.isFormer != rhs.isFormer { return !lhs.isFormer }
+            let (l, r) = (volume(lhs), volume(rhs))
+            return l != r ? l > r : lhs.identifier < rhs.identifier
+        }
+    }
+
+    /// Fill each label from `names`; an empty map leaves the labels nil.
+    private static func relabel(_ roster: inout [Participant], names: [String: String]) {
+        guard !names.isEmpty else { return }
+        let byHandle = groupSpeakerLabels(participants: roster, names: names)
+        for i in roster.indices { roster[i].label = byHandle[roster[i].handleID] }
+    }
+
+    /// A group name for comparison: trimmed, case-folded, inner spaces collapsed.
+    static func normalizedGroupName(_ name: String?) -> String? {
+        guard let name else { return nil }
+        let folded = name.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return folded.isEmpty ? nil : folded
+    }
+
+    /// Handle ROWID to a person key. Handles join when they share a normalized
+    /// identifier (one number on iMessage, SMS, and RCS), a `person_centric_id`, or
+    /// a Contacts card. The key is the smallest normalized identifier in the set.
+    public static func personKeys(
+        handleLabels: [Int64: String],
+        personCentricIDs: [Int64: String] = [:],
+        contactIDs: [String: String] = [:],
+        region: String = ContactsMap.defaultRegion
+    ) -> [Int64: String] {
+        let handles = handleLabels.keys.sorted()
+        let normalized = Dictionary(
+            uniqueKeysWithValues: handles.map {
+                ($0, ContactsMap.normalizeHandle(handleLabels[$0] ?? "", defaultRegion: region))
+            })
+        var parent = Dictionary(uniqueKeysWithValues: handles.map { ($0, $0) })
+        func find(_ h: Int64) -> Int64 {
+            var root = h
+            while let next = parent[root], next != root { root = next }
+            parent[h] = root
+            return root
+        }
+        func link(_ groups: [String: [Int64]]) {
+            for members in groups.values {
+                for h in members.dropFirst() {
+                    let (a, b) = (find(members[0]), find(h))
+                    if a != b { parent[max(a, b)] = min(a, b) }
+                }
+            }
+        }
+        link(
+            Dictionary(grouping: handles.filter { !(normalized[$0] ?? "").isEmpty }) {
+                normalized[$0] ?? ""
+            })
+        link(
+            Dictionary(grouping: handles.filter { personCentricIDs[$0] != nil }) {
+                "pc:" + (personCentricIDs[$0] ?? "")
+            })
+        link(
+            Dictionary(grouping: handles.filter { contactIDs[normalized[$0] ?? ""] != nil }) {
+                "card:" + (contactIDs[normalized[$0] ?? ""] ?? "")
+            })
+        let members = Dictionary(grouping: handles, by: find)
+        var keys: [Int64: String] = [:]
+        for group in members.values {
+            let key = group.compactMap { normalized[$0] }.filter { !$0.isEmpty }.min() ?? ""
+            for h in group { keys[h] = key.isEmpty ? "h\(h)" : key }
+        }
+        return keys
+    }
+
+    /// The per-chat key behind `Conversation.chatGUIDs`.
+    static func chatKey(guid: String?, chatID: Int64) -> String {
+        if let guid, !guid.isEmpty { return guid }
+        return "rowid:\(chatID)"
+    }
+
+    /// `chat:` plus the smallest chat key, so it never depends on ROWID order.
+    static func stableID(_ chatKeys: Set<String>) -> String {
+        "chat:" + (chatKeys.min() ?? "")
+    }
+
+    /// The 0.3.1 key for a 1:1 identifier: its normalizer with the US default.
+    static func legacyHandleKey(_ handle: String) -> String {
+        if handle.contains("@") { return handle.lowercased() }
+        let digits = handle.filter(\.isNumber)
+        guard digits.count >= 7 else { return handle }
+        if handle.contains("+") || (digits.count == 11 && digits.hasPrefix("1")) {
+            return "+" + digits
+        }
+        return "+1" + (digits.hasPrefix("0") ? String(digits.dropFirst()) : digits)
+    }
+
+    /// The 0.3.1 group id: `group:` plus the sorted handle ROWIDs.
+    static func legacyGroupID(_ handles: some Sequence<Int64>) -> String {
+        "group:" + handles.sorted().map(String.init).joined(separator: ",")
     }
 
     // MARK: - Opt-in fuzzy / membership-change stitching
@@ -445,6 +680,10 @@ public enum Conversations {
     /// Tiny rosters are additionally floored at `minRosterSize` on **both** sides
     /// of a pair, so a 1- or 2-person thread never anchors a fuzzy merge (those are
     /// where subset/Jaccard signals are least trustworthy).
+    ///
+    /// Two vetoes override both rules: different non-empty names never merge, and
+    /// two groups active at the same time never merge, because a membership
+    /// change ends one roster as the next begins.
     struct FuzzyRule {
         /// Smaller roster must be ≥ this fraction of the larger (subset rule).
         /// 0.6 ⇒ at a 5-member group you may drop to 3 (3/5 = .6) but not to 2.
@@ -457,6 +696,8 @@ public enum Conversations {
         static let minJaccard = 0.8
         /// No fuzzy pair may involve a roster smaller than this (3 = a real group).
         static let minRosterSize = 3
+        /// Active ranges may overlap this much (stragglers in the old chat).
+        static let maxOverlap: TimeInterval = 86_400
     }
 
     /// The opt-in membership-change merge. Pure (no DB / Contacts I/O), so the
@@ -534,8 +775,14 @@ public enum Conversations {
     /// under `FuzzyRule`. The single pairwise predicate `fuzzyMerge` builds its
     /// relation graph from — kept separate so the rule is unit-testable on a pair.
     static func fuzzyPairMatches(_ a: Conversation, _ b: Conversation) -> Bool {
-        let lhs = a.targetHandles
-        let rhs = b.targetHandles
+        if let an = normalizedGroupName(a.groupName), let bn = normalizedGroupName(b.groupName),
+            an != bn
+        {
+            return false
+        }
+        if wereActiveTogether(a, b) { return false }
+        let lhs = rosterKeys(a)
+        let rhs = rosterKeys(b)
         // Tiny-roster floor: never let a 1- or 2-person thread anchor a merge.
         guard lhs.count >= FuzzyRule.minRosterSize, rhs.count >= FuzzyRule.minRosterSize else {
             return false
@@ -560,12 +807,35 @@ public enum Conversations {
         // Rule 2 — high Jaccard, but ONLY with a corroborating shared display_name.
         let union = lhs.union(rhs).count
         let jaccard = union == 0 ? 0 : Double(intersection) / Double(union)
-        if jaccard >= FuzzyRule.minJaccard,
-            let an = a.groupName, let bn = b.groupName, !an.isEmpty, an == bn
+        if jaccard >= FuzzyRule.minJaccard, normalizedGroupName(a.groupName) != nil,
+            normalizedGroupName(a.groupName) == normalizedGroupName(b.groupName)
         {
             return true
         }
         return false
+    }
+
+    /// The current people in a group roster (one key per person, not per handle).
+    static func rosterKeys(_ conversation: Conversation) -> Set<String> {
+        conversation.participants.isEmpty
+            ? Set(conversation.targetHandles.map { "h\($0)" })
+            : Set(conversation.participants.filter { !$0.isFormer }.map(\.personKey))
+    }
+
+    /// True when both groups were active at the same time: their date ranges
+    /// overlap by more than `FuzzyRule.maxOverlap`, or one range sits inside the
+    /// other. Unknown first dates never veto.
+    static func wereActiveTogether(_ a: Conversation, _ b: Conversation) -> Bool {
+        guard let aFirst = a.firstMessageDate, let bFirst = b.firstMessageDate else {
+            return false
+        }
+        let overlap =
+            min(a.lastMessageDate, b.lastMessageDate).timeIntervalSince(max(aFirst, bFirst))
+        guard overlap > 0 else { return false }
+        if overlap > FuzzyRule.maxOverlap { return true }
+        let aInsideB = aFirst >= bFirst && a.lastMessageDate <= b.lastMessageDate
+        let bInsideA = bFirst >= aFirst && b.lastMessageDate <= a.lastMessageDate
+        return aInsideB || bInsideA
     }
 
     /// Fold a clique of "same group" exact-set conversations into one. Unions
@@ -587,28 +857,39 @@ public enum Conversations {
         let groupName = byRecency.compactMap(\.groupName).first { !$0.isEmpty }
         let primaryIdentifier = byRecency.first?.primaryIdentifier ?? ""
 
-        // Roster = the union of every member's participants, deduped by handle ROWID
-        // (the same person may appear in several forks). Re-label from `names` when
-        // a Contacts map is supplied so the merged roster carries resolved labels;
-        // else keep whatever labels the inputs had.
-        var seen = Set<Int64>()
+        // Roster = everyone ever a member, one entry per person (their handles
+        // unioned). Re-label from `names` when supplied; else keep the input labels.
+        // The newest member's current roster is the group's current roster.
+        let current = Set(byRecency[0].participants.filter { !$0.isFormer }.map(\.personKey))
         var participants: [Participant] = []
+        var indexByPerson: [String: Int] = [:]
         for member in byRecency {
-            for p in member.participants where seen.insert(p.handleID).inserted {
-                participants.append(p)
+            for p in member.participants {
+                if let i = indexByPerson[p.personKey] {
+                    let kept = participants[i]
+                    participants[i] = Participant(
+                        handleID: kept.handleID, identifier: kept.identifier, label: kept.label,
+                        handleIDs: kept.handleIDs.union(p.handleIDs), personKey: kept.personKey,
+                        isFormer: kept.isFormer)
+                } else {
+                    var added = p
+                    added.isFormer = !current.contains(p.personKey)
+                    indexByPerson[p.personKey] = participants.count
+                    participants.append(added)
+                }
             }
         }
-        if !names.isEmpty {
-            let byHandle = groupSpeakerLabels(participants: participants, names: names)
-            for i in participants.indices {
-                participants[i].label = byHandle[participants[i].handleID]
-            }
-        }
+        participants = participants.filter { !$0.isFormer } + participants.filter(\.isFormer)
+        relabel(&participants, names: names)
         let identifiers = Set(participants.map(\.identifier))
-        let display = groupName ?? identifiers.sorted().joined(separator: ", ")
+        let display =
+            groupName
+            ?? Set(participants.filter { !$0.isFormer }.map(\.identifier)).sorted()
+            .joined(separator: ", ")
 
+        let chatKeys = members.reduce(into: Set<String>()) { $0.formUnion($1.chatGUIDs) }
         return Conversation(
-            id: "group:" + targetHandles.sorted().map(String.init).joined(separator: ","),
+            id: stableID(chatKeys),
             displayName: display,
             chatIDs: chatIDs,
             targetHandles: targetHandles,
@@ -619,7 +900,13 @@ public enum Conversations {
             isContact: false,
             isGroup: true,
             participants: participants,
-            groupName: groupName)
+            groupName: groupName,
+            legacyIDs: members.reduce(into: [legacyGroupID(targetHandles)]) {
+                $0.formUnion($1.legacyIDs)
+            },
+            chatGUIDs: chatKeys,
+            firstMessageDate: members.compactMap(\.firstMessageDate).min(),
+            ownerHandles: members.reduce(into: Set<Int64>()) { $0.formUnion($1.ownerHandles) })
     }
 
     /// Per-thread group speaker labels: a group's roster + a
@@ -713,5 +1000,47 @@ public enum Conversations {
             return identifier
         }
         return "(\(national.prefix(3))) \(national.dropFirst(3).prefix(3))-\(national.suffix(4))"
+    }
+}
+
+/// Union-find over chat indexes that refuses to join two different group names.
+struct NameAwareUnion {
+    private var parent: [Int]
+    private var namesByRoot: [Int: Set<String>]
+    private let rowNames: [String?]
+
+    init(names: [String?]) {
+        rowNames = names
+        parent = Array(names.indices)
+        namesByRoot = Dictionary(
+            uniqueKeysWithValues: names.enumerated().map {
+                ($0.offset, Set([$0.element].compactMap { $0 }))
+            })
+    }
+
+    func name(of row: Int) -> String? { rowNames[row] }
+
+    mutating func find(_ row: Int) -> Int {
+        var root = row
+        while parent[root] != root { root = parent[root] }
+        parent[row] = root
+        return root
+    }
+
+    /// Joins the two sets unless that would put two different names together.
+    mutating func union(_ a: Int, _ b: Int) {
+        let (ra, rb) = (find(a), find(b))
+        guard ra != rb else { return }
+        let merged = (namesByRoot[ra] ?? []).union(namesByRoot[rb] ?? [])
+        guard merged.count <= 1 else { return }
+        let (keep, drop) = (min(ra, rb), max(ra, rb))
+        parent[drop] = keep
+        namesByRoot[keep] = merged
+        namesByRoot[drop] = nil
+    }
+
+    mutating func groups() -> [[Int]] {
+        Dictionary(grouping: parent.indices, by: { find($0) }).values.map { $0.sorted() }
+            .sorted { $0[0] < $1[0] }
     }
 }
