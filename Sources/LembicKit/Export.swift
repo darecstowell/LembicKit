@@ -233,7 +233,7 @@ extension Export {
             records: extraction.records, number: conversation.primaryIdentifier,
             formats: formats, scope: scope, redactions: redactions, detect: detect,
             group: Export.groupRenderInfo(for: conversation), systemEvents: systemEvents,
-            skipped: extraction.skipped)
+            skipped: extraction.skipped, noteToSelf: conversation.isNoteToSelf)
     }
 
     /// The `Transcript.GroupRenderInfo` for a group conversation (the roster
@@ -457,7 +457,8 @@ extension Export {
         detect: Bool = true,
         group: Transcript.GroupRenderInfo? = nil,
         systemEvents: [Transcript.SystemEvent] = [],
-        skipped: [SkippedMessage] = []
+        skipped: [SkippedMessage] = [],
+        noteToSelf: Bool = false
     ) -> Rendered {
         // (1) Filter to the scope's date window (nil = full history) — the single
         // filtering path, shared with the public `records(_:scope:)` accessor.
@@ -510,7 +511,7 @@ extension Export {
                 records: filtered, number: number, trim: scope.trim,
                 redactions: effectiveRedactions, detected: detected,
                 anonymize: scope.anonymizeSpeakers, group: group,
-                systemEvents: scopedEvents)
+                systemEvents: scopedEvents, noteToSelf: noteToSelf)
             txt = rendered.text
             result = rendered
         }

@@ -121,6 +121,8 @@ public struct Conversation: Identifiable, Sendable, Equatable {
     /// Handles in this conversation that belong to the owner (a second number or
     /// email). Their messages label as "Me", and they are never participants.
     public let ownerHandles: Set<Int64>
+    /// A 1:1 with the owner's own address (notes to self).
+    public let isNoteToSelf: Bool
 
     public init(
         id: String,
@@ -138,9 +140,11 @@ public struct Conversation: Identifiable, Sendable, Equatable {
         legacyIDs: Set<String> = [],
         chatGUIDs: Set<String> = [],
         firstMessageDate: Date? = nil,
-        ownerHandles: Set<Int64> = []
+        ownerHandles: Set<Int64> = [],
+        isNoteToSelf: Bool = false
     ) {
         self.ownerHandles = ownerHandles
+        self.isNoteToSelf = isNoteToSelf
         self.id = id
         self.legacyIDs = legacyIDs
         self.chatGUIDs = chatGUIDs
@@ -244,9 +248,14 @@ public enum Conversations {
                 + summaries.compactMap(\.identifier).map {
                     ContactsMap.normalizeHandle($0, defaultRegion: region)
                 })
+        let groupSummaries = try db.groupConversationSummaries()
+        owner.formUnion(
+            ownerAddresses(
+                seen: summaries.map(\.ownerIdentifiers) + groupSummaries.map(\.ownerIdentifiers),
+                region: region))
         let oneToOnes = group(
             summaries, contacts: names, contactIDs: cards,
-            handlesByIdentifier: handlesByIdentifier, region: region)
+            handlesByIdentifier: handlesByIdentifier, owner: owner, region: region)
 
         // Group chats (style=43): exact-participant-set stitched, then merged into
         // the same recency-sorted list. handleLabels lets the roster carry each
@@ -254,15 +263,10 @@ public enum Conversations {
         // `participantCounts` (one grouped query, this session) orders each
         // roster most-active-first — summed across a fork's chatIDs
         // in memory, never per row.
-        let groupSummaries = try db.groupConversationSummaries()
         let participantCounts = try db.groupParticipantMessageCounts()
         let people = personKeys(
             handleLabels: handleLabels, personCentricIDs: try db.personCentricIDs(),
             contactIDs: cards, region: region)
-        let ownerRaw =
-            summaries.flatMap(\.ownerIdentifiers)
-            + groupSummaries.flatMap(\.ownerIdentifiers)
-        owner.formUnion(ownerRaw.map { ContactsMap.normalizeHandle($0, defaultRegion: region) })
         var groups = groupGroups(
             groupSummaries, handleLabels: handleLabels, names: names,
             participantCounts: participantCounts, personKeys: people,
@@ -293,6 +297,21 @@ public enum Conversations {
         return try list(from: db, resolvingContacts: resolvingContacts)
     }
 
+    /// The owner's addresses from `destination_caller_id`: an address counts only
+    /// when the owner sent from it in two or more chats, so one odd row can never
+    /// turn another person into "Me".
+    public static func ownerAddresses(
+        seen perChat: [Set<String>], region: String = ContactsMap.defaultRegion
+    ) -> Set<String> {
+        var chats: [String: Int] = [:]
+        for addresses in perChat {
+            let normalized = Set(
+                addresses.map { ContactsMap.normalizeHandle($0, defaultRegion: region) })
+            for address in normalized { chats[address, default: 0] += 1 }
+        }
+        return Set(chats.filter { $0.value >= 2 }.keys)
+    }
+
     // MARK: - 1:1 multi-identifier union
 
     /// Pure grouping: fold raw per-chat summaries into people. No DB, no Contacts
@@ -300,11 +319,13 @@ public enum Conversations {
     /// Keyed by Contacts card (`contactIDs`, so one card's phone + email merge),
     /// else by the normalized identifier. Two cards with the same name stay two
     /// conversations. Newest conversation first. This is the unit-test seam.
+    /// A conversation whose identifiers are all in `owner` is a note to self.
     public static func group(
         _ summaries: [ChatDatabase.ConversationSummary],
         contacts: [String: String],
         contactIDs: [String: String] = [:],
         handlesByIdentifier: [String: Set<Int64>] = [:],
+        owner: Set<String> = [],
         region: String = ContactsMap.defaultRegion
     ) -> [Conversation] {
         struct Acc {
@@ -359,7 +380,8 @@ public enum Conversations {
                     primaryIdentifier: a.number,
                     isContact: a.name != nil,
                     legacyIDs: a.identifiers.union(a.legacy).union(a.name.map { [$0] } ?? []),
-                    chatGUIDs: a.chatKeys)
+                    chatGUIDs: a.chatKeys,
+                    isNoteToSelf: !a.identifiers.isEmpty && a.identifiers.isSubset(of: owner))
             }
             .sorted { $0.lastMessageDate > $1.lastMessageDate }
     }

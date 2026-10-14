@@ -486,7 +486,8 @@ public enum Transcript {
         anonymize: Bool = false,
         group: GroupRenderInfo? = nil,
         systemEvents: [SystemEvent] = [],
-        timeZone: TimeZone = .current
+        timeZone: TimeZone = .current,
+        noteToSelf: Bool = false
     ) -> RenderResult {
         let day = formatter("yyyy-MM-dd", timeZone: timeZone)
         let weekday = formatter("EEE", timeZone: timeZone)
@@ -562,6 +563,8 @@ public enum Transcript {
         // whole point is to hide who the thread is with.
         if let group, renderGroup {
             out += "# iMessage group transcript: \"\(group.name)\"\n"
+        } else if noteToSelf, !anonymize {
+            out += "# iMessage transcript: notes to self\n"
         } else {
             out +=
                 anonymize ? "# iMessage transcript\n" : "# iMessage transcript with \(number)\n"
@@ -590,6 +593,8 @@ public enum Transcript {
             let people = (1...Swift.max(aliases.count, 1)).map { "Person \($0) (P\($0))" }
                 .joined(separator: ", ")
             out += "# Speakers: \(people) — names anonymized.\n"
+        } else if noteToSelf {
+            out += "# Speakers: Me = the account owner\n"
         } else {
             out += "# Speakers: Me = the account owner, Them = \(number)\n"
         }
@@ -600,7 +605,7 @@ public enum Transcript {
             if let group, renderGroup {
                 reactor = group.participantLabels.first ?? "a member"
             } else {
-                reactor = anonymize ? "PN" : "Them"
+                reactor = anonymize ? "PN" : noteToSelf ? "Me" : "Them"
             }
             out += "# Reactions shown as [\(reactor): ❤️] after the message they target.\n"
         }

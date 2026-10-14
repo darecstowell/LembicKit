@@ -104,8 +104,9 @@ struct GroupRosterTests {
             destination_caller_id TEXT);
         INSERT INTO handle VALUES (1,'+15555550101'),(2,'+15555550106'),(3,'+15555550108'),
             (4,'darec@example.com'),(5,'+15555550109');
-        INSERT INTO chat VALUES (10,'iMessage;+;chat10',43,'chat10','Trip crew');
-        INSERT INTO chat_handle_join VALUES (10,1),(10,2),(10,4);
+        INSERT INTO chat VALUES (10,'iMessage;+;chat10',43,'chat10','Trip crew'),
+            (11,'iMessage;-;+15555550101',45,'+15555550101',NULL);
+        INSERT INTO chat_handle_join VALUES (10,1),(10,2),(10,4),(11,1);
         INSERT INTO message VALUES
             (1,'a',1000000000000,0,1,'Who is driving?',0,0,0,NULL),
             (2,'b',2000000000000,0,1,NULL,1,0,3,NULL),
@@ -113,6 +114,9 @@ struct GroupRosterTests {
             (4,'d',4000000000000,0,1,NULL,1,0,5,NULL),
             (5,'e',5000000000000,1,0,'Thanks all',0,0,0,'darec@example.com');
         INSERT INTO chat_message_join (chat_id, message_id) SELECT 10, ROWID FROM message;
+        INSERT INTO message VALUES
+            (6,'f',6000000000000,1,0,'Lunch?',0,0,0,'darec@example.com');
+        INSERT INTO chat_message_join VALUES (11,6);
         """
 
     @Test func databaseFindsFormerMembersAndTheOwner() throws {
@@ -122,9 +126,17 @@ struct GroupRosterTests {
         #expect(
             try db.groupConversationSummaries().first?.ownerIdentifiers == ["darec@example.com"])
         let group = try #require(
-            try Conversations.list(from: db, contacts: Self.names, region: "US").first)
+            try Conversations.list(from: db, contacts: Self.names, region: "US").first(
+                where: \.isGroup))
         #expect(group.participants.map(\.label) == ["Ana", "Dev", "Carla", "Eli"])
         #expect(group.participants.map(\.isFormer) == [false, false, true, true])
         #expect(group.ownerHandles == [4])
+    }
+
+    @Test func oneOddAddressIsNotTheOwner() {
+        #expect(Conversations.ownerAddresses(seen: [["+15555550101"], []]).isEmpty)
+        #expect(
+            Conversations.ownerAddresses(seen: [["Darec@Example.com"], ["darec@example.com"]])
+                == ["darec@example.com"])
     }
 }

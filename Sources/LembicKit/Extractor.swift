@@ -69,6 +69,8 @@ public struct SkippedMessage: Sendable, Equatable {
         case unknownReaction
         /// A `date` the engine cannot read (zero, negative, or missing).
         case invalidDate
+        /// In a note to self, the incoming copy of a message the owner sent. Not lost.
+        case echo
     }
 
     public let date: Date?
@@ -104,15 +106,20 @@ public struct Extractor: Sendable {
     /// 1:1 (and for a group built without per-speaker labels), so the off-roster
     /// first-token / number-format fallback is unchanged there.
     public let rosterHandles: Set<Int64>
+    /// A chat with the owner's own address: every row is "Me", and the incoming
+    /// copy of each sent message is dropped.
+    public let isNoteToSelf: Bool
 
     public init(
         targetHandles: Set<Int64>,
         handleLabels: [Int64: String],
-        rosterHandles: Set<Int64> = []
+        rosterHandles: Set<Int64> = [],
+        isNoteToSelf: Bool = false
     ) {
         self.targetHandles = targetHandles
         self.handleLabels = handleLabels
         self.rosterHandles = rosterHandles
+        self.isNoteToSelf = isNoteToSelf
     }
 
     /// The right `Extractor` for a `Conversation`, branching on `isGroup` (the
@@ -135,7 +142,9 @@ public struct Extractor: Sendable {
         globalLabels: [Int64: String]
     ) -> Extractor {
         guard conversation.isGroup else {
-            return Extractor(targetHandles: conversation.targetHandles, handleLabels: globalLabels)
+            return Extractor(
+                targetHandles: conversation.targetHandles, handleLabels: globalLabels,
+                isNoteToSelf: conversation.isNoteToSelf)
         }
         var perSpeaker = globalLabels
         var rosterHandles = Set<Int64>()
@@ -153,7 +162,7 @@ public struct Extractor: Sendable {
     }
 
     public func label(isFromMe: Bool, handleID: Int64) -> String {
-        if isFromMe { return "Me" }
+        if isFromMe || isNoteToSelf { return "Me" }
         if targetHandles.contains(handleID) { return "Them" }
         return handleLabels[handleID] ?? "h\(handleID)"
     }
@@ -405,6 +414,7 @@ public struct Extractor: Sendable {
         func m(_ column: String) -> String { cols.column("m", "message", column) }
 
         var emitted: [MessageRecord] = []
+        var incoming: [Bool] = []
         var skipped: [SkippedMessage] = []
         var indexByGUID: [String: Int] = [:]
         var rawReactions: [RawReaction] = []
@@ -546,6 +556,19 @@ public struct Extractor: Sendable {
                 flags: flags)
             if let guid { indexByGUID[guid] = emitted.count }
             emitted.append(record)
+            incoming.append(!isFromMe)
+        }
+
+        if isNoteToSelf {
+            let echoes = Self.echoes(in: emitted, incoming: incoming)
+            for (echo, sent) in echoes {
+                if let guid = emitted[echo].guid { indexByGUID[guid] = sent }
+                skipped.append(SkippedMessage(date: emitted[echo].date, reason: .echo))
+            }
+            let kept = emitted.indices.filter { echoes[$0] == nil }
+            let newIndex = Dictionary(uniqueKeysWithValues: kept.enumerated().map { ($1, $0) })
+            indexByGUID = indexByGUID.compactMapValues { newIndex[$0] }
+            emitted = kept.map { emitted[$0] }
         }
 
         for (targetGUID, reaction) in Reactions.net(rawReactions) {
@@ -560,6 +583,26 @@ public struct Extractor: Sendable {
             }
         }
         return Extraction(records: emitted, skipped: skipped)
+    }
+
+    /// In a note to self, each incoming row that repeats a sent row's text within a
+    /// minute, mapped to that sent row's index. Each sent row pairs once.
+    static func echoes(in records: [MessageRecord], incoming: [Bool]) -> [Int: Int] {
+        var sentByText: [String: [Int]] = [:]
+        for i in records.indices where !incoming[i] {
+            sentByText[records[i].text, default: []].append(i)
+        }
+        var pairs: [Int: Int] = [:]
+        for i in records.indices where incoming[i] {
+            guard var candidates = sentByText[records[i].text],
+                let match = candidates.firstIndex(where: {
+                    abs(records[$0].date.timeIntervalSince(records[i].date)) <= 60
+                })
+            else { continue }
+            pairs[i] = candidates.remove(at: match)
+            sentByText[records[i].text] = candidates
+        }
+        return pairs
     }
 
     /// `item_type` values for group and system events, which the event stream reads.

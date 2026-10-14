@@ -31,6 +31,14 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- A note to self shows each note once. A 1:1 whose identifiers all belong to the
+  owner is `Conversation.isNoteToSelf`: every row is "Me", the incoming copy of
+  each sent note (same text within a minute) is dropped and counted as
+  `SkippedMessage.Reason.echo`, and the header reads "notes to self". An address
+  counts as the owner's when the Me card has it or the owner sent from it in two
+  or more chats (`Conversations.ownerAddresses(seen:)`), so one odd row never
+  turns another person into "Me". `Transcript.compactText` and
+  `Export.render(records:...)` take a `noteToSelf:` flag (lembickit.md F19).
 - Business chats keep their real id. `normalizeHandle` returns a handle with a
   `:` (for example `urn:biz:…`) or a letter unchanged, so it no longer becomes
   a fake phone number like `+186231245980123456789`. The 0.3.1 key stays in
