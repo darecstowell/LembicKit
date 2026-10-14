@@ -289,11 +289,9 @@ extension Export {
     ///    through `Transcript.anonymizationMap` (built from the date-filtered set, so
     ///    the `PN` numbering matches the `.txt`/`.jsonl` map exactly).
     ///
-    /// Redaction is NOT applied here — that stays per-message at render time via
-    /// `Transcript.redactedText(of:redactions:)`, mirroring `compactText` (which
-    /// splices `[redacted]` over the trimmed body). A renderer feeds these prepared
-    /// records to `redactedText`, so trim + anonymize + redaction all compose, and
-    /// whole-message-redacted rows are still omitted by the renderer.
+    /// Redaction is NOT applied here. Redaction offsets point into the SOURCE text,
+    /// so they do not fit a trimmed body: an output that needs redaction must use
+    /// `preparedRedactedRecords`, never `redactedText` on these records.
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
@@ -314,30 +312,33 @@ extension Export {
                 if text.isEmpty { continue }
             }
 
-            var reactions = scope.trim.dropReactions ? [] : record.reactions
-            var speaker = record.speaker
-            if scope.anonymizeSpeakers {
-                speaker = aliases[record.speaker] ?? record.speaker
-                reactions = reactions.map {
-                    Reaction(by: aliases[$0.by] ?? $0.by, emoji: $0.emoji)
-                }
-            }
-
-            // Only rebuild when something changed (the no-trim/no-anonymize default
-            // returns the record untouched, preserving its guid/date/flags).
-            if text == record.text, speaker == record.speaker,
-                reactions == record.reactions
-            {
-                out.append(record)
-            } else {
-                out.append(
-                    MessageRecord(
-                        guid: record.guid, date: record.date, speaker: speaker,
-                        isTarget: record.isTarget, service: record.service, text: text,
-                        hadAttachment: record.hadAttachment, reactions: reactions))
-            }
+            out.append(prepared(record, text: text, scope: scope, aliases: aliases))
         }
         return out
+    }
+
+    /// `record` with `text`, the reaction trim, and the speaker aliases applied.
+    private static func prepared(
+        _ record: MessageRecord, text: String, scope: Scope, aliases: [String: String]
+    ) -> MessageRecord {
+        var reactions = scope.trim.dropReactions ? [] : record.reactions
+        var speaker = record.speaker
+        if scope.anonymizeSpeakers {
+            speaker = aliases[record.speaker] ?? record.speaker
+            reactions = reactions.map {
+                Reaction(by: aliases[$0.by] ?? $0.by, emoji: $0.emoji)
+            }
+        }
+
+        // Only rebuild when something changed (the no-trim/no-anonymize default
+        // returns the record untouched, preserving its guid/date/flags).
+        if text == record.text, speaker == record.speaker, reactions == record.reactions {
+            return record
+        }
+        return MessageRecord(
+            guid: record.guid, date: record.date, speaker: speaker,
+            isTarget: record.isTarget, service: record.service, text: text,
+            hadAttachment: record.hadAttachment, reactions: reactions)
     }
 
     /// The **effective** redaction set for a render: the caller's manual
@@ -385,11 +386,8 @@ extension Export {
     /// The returned records carry the FINAL body: a caller hands them to a
     /// formatter with an **empty** `RedactionSet()` (the redaction is already baked).
     ///
-    /// - Important: redactions are applied against each record's **untrimmed**
-    ///   `text` offsets, matching `compactText`. Under the non-default
-    ///   `dropAttachmentPlaceholders`, placeholder stripping happens in step 1
-    ///   while redaction offsets anchor to the original text — the same documented
-    ///   trim/redaction edge `compactText` carries (not made worse here).
+    /// - Important: the placeholder strip, the redactions, and the aliases all use
+    ///   the record's source `text` offsets, exactly as `compactText` does.
     public static func preparedRedactedRecords(
         _ records: [MessageRecord], scope: Scope, redactions: RedactionSet
     ) -> [MessageRecord] {
@@ -404,29 +402,20 @@ extension Export {
         let aliases =
             scope.anonymizeSpeakers ? Transcript.anonymizationMap(for: filtered) : [:]
 
-        // trim + speaker-alias prepared records (date filter already applied above,
-        // re-applied identically inside — `preparedRecords` is idempotent on a
-        // date-filtered set since `records(_:scope:)` is a no-op when in range).
-        let prepared = Self.preparedRecords(filtered, scope: scope)
-
         var out: [MessageRecord] = []
-        out.reserveCapacity(prepared.count)
-        for record in prepared {
-            // Bake the unified body: effective redactions + in-body name aliases.
+        out.reserveCapacity(filtered.count)
+        for record in filtered {
+            // Trim, redactions, and in-body aliases all splice the SOURCE text in one
+            // pass, so a stripped placeholder can never shift a redaction span.
             // nil ⇒ whole-message redacted ⇒ drop the row.
+            let strip = scope.trim.dropAttachmentPlaceholders && record.hadAttachment
+            if strip, Transcript.stripPlaceholders(record.text).isEmpty { continue }
             guard
                 let body = Transcript.renderedBody(
-                    of: record, redactions: effective, aliases: aliases)
+                    of: record, redactions: effective, aliases: aliases,
+                    stripPlaceholders: strip)
             else { continue }
-            if body == record.text {
-                out.append(record)
-            } else {
-                out.append(
-                    MessageRecord(
-                        guid: record.guid, date: record.date, speaker: record.speaker,
-                        isTarget: record.isTarget, service: record.service, text: body,
-                        hadAttachment: record.hadAttachment, reactions: record.reactions))
-            }
+            out.append(prepared(record, text: body, scope: scope, aliases: aliases))
         }
         return out
     }

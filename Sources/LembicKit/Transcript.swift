@@ -98,12 +98,61 @@ public enum Transcript {
     /// gates on `hadAttachment`, so a literally-typed "[pdf]" in a message with
     /// no real attachment is left alone (rare edge, acceptable for a trim).
     static func stripPlaceholders(_ s: String) -> String {
-        var out = s
+        let source = s as NSString
+        return applyReplacements(to: source, placeholderStripSubstitutions(source))
+    }
+
+    /// The placeholder strip as substitutions in SOURCE offsets, so it composes with
+    /// redaction spans and the `OffsetMap` instead of shifting them.
+    static func placeholderStripSubstitutions(_ source: NSString) -> [BodySubstitution] {
+        let length = source.length
+        guard length > 0 else { return [] }
+        var isToken = [Bool](repeating: false, count: length)
         for token in placeholderTokens {
-            out = out.replacingOccurrences(of: token, with: " ")
+            var search = NSRange(location: 0, length: length)
+            while search.length > 0 {
+                let found = source.range(of: token, options: .literal, range: search)
+                if found.location == NSNotFound { break }
+                for k in found.location..<(found.location + found.length) { isToken[k] = true }
+                let next = found.location + found.length
+                search = NSRange(location: next, length: length - next)
+            }
         }
-        return Extractor.collapseSpaceRuns(out)
-            .trimmingCharacters(in: Extractor.pythonWhitespace)
+        func isSpace(_ k: Int) -> Bool {
+            let c = source.character(at: k)
+            return c == 0x20 || c == 0x09
+        }
+        func isEdge(_ k: Int) -> Bool {
+            if isToken[k] { return true }
+            guard let scalar = Unicode.Scalar(source.character(at: k)) else { return false }
+            return Extractor.pythonWhitespace.contains(scalar)
+        }
+        var head = 0
+        while head < length, isEdge(head) { head += 1 }
+        guard head < length else {
+            return [BodySubstitution(range: 0..<length, token: "", isRedaction: false)]
+        }
+        var tail = length
+        while tail > head, isEdge(tail - 1) { tail -= 1 }
+        var out: [BodySubstitution] = []
+        if head > 0 { out.append(BodySubstitution(range: 0..<head, token: "", isRedaction: false)) }
+        var k = head
+        while k < tail {
+            guard isToken[k] || isSpace(k) else {
+                k += 1
+                continue
+            }
+            var end = k
+            while end < tail, isToken[end] || isSpace(end) { end += 1 }
+            if !(end - k == 1 && source.character(at: k) == 0x20) {
+                out.append(BodySubstitution(range: k..<end, token: " ", isRedaction: false))
+            }
+            k = end
+        }
+        if tail < length {
+            out.append(BodySubstitution(range: tail..<length, token: "", isRedaction: false))
+        }
+        return out
     }
 
     static func formatter(_ format: String, timeZone: TimeZone = .current) -> DateFormatter {
@@ -402,7 +451,8 @@ public enum Transcript {
     /// `source` is the message body as an `NSString` (UTF-16 offsets); `guid` is
     /// nil-safe (a nil-guid message has no redactions, only aliases can apply).
     static func bodyReplacements(
-        source: NSString, guid: String?, redactions: RedactionSet, aliases: [String: String]
+        source: NSString, guid: String?, redactions: RedactionSet, aliases: [String: String],
+        stripPlaceholders: Bool = false
     ) -> [BodySubstitution] {
         let sourceLen = source.length
 
@@ -439,9 +489,16 @@ public enum Transcript {
                 !redactionReps.contains { r in rangesOverlap(a.range, r.range) }
             }
 
+        // A strip that touches a redaction is dropped: the redaction already hides it.
+        let stripReps =
+            stripPlaceholders
+            ? placeholderStripSubstitutions(source).filter { s in
+                !redactionReps.contains { r in rangesOverlap(s.range, r.range) }
+            } : []
+
         // (c) Unified, non-overlapping, ascending list. Redactions are placed first
         // so an alias that ties a redaction start is dropped.
-        return dedupedReplacements(redactionReps + aliasReps)
+        return dedupedReplacements(redactionReps + stripReps + aliasReps)
     }
 
     /// The fully-rendered body for ONE message — redaction spans spliced to
@@ -463,6 +520,14 @@ public enum Transcript {
     public static func renderedBody(
         of record: MessageRecord, redactions: RedactionSet, aliases: [String: String]
     ) -> String? {
+        renderedBody(of: record, redactions: redactions, aliases: aliases, stripPlaceholders: false)
+    }
+
+    /// `renderedBody` with the optional placeholder strip, applied in source offsets.
+    static func renderedBody(
+        of record: MessageRecord, redactions: RedactionSet, aliases: [String: String],
+        stripPlaceholders: Bool
+    ) -> String? {
         if let guid = record.guid {
             let rs = redactions.redactions(forGuid: guid)
             let len = (record.text as NSString).length
@@ -472,7 +537,8 @@ public enum Transcript {
         }
         let source = record.text as NSString
         let reps = bodyReplacements(
-            source: source, guid: record.guid, redactions: redactions, aliases: aliases)
+            source: source, guid: record.guid, redactions: redactions, aliases: aliases,
+            stripPlaceholders: stripPlaceholders)
         return applyReplacements(to: source, reps)
     }
 
@@ -503,7 +569,8 @@ public enum Transcript {
         struct Emit {
             let date: Date
             let speaker: String
-            let text: String  // body BEFORE redaction transforms (post attach-trim)
+            let text: String  // source body; trim and redaction both splice in source offsets
+            let stripPlaceholders: Bool
             let reactions: [Reaction]
             let hadAttachment: Bool
             let guid: String?
@@ -512,11 +579,8 @@ public enum Transcript {
         var emit: [Emit] = []
         emit.reserveCapacity(records.count)
         for r in records {
-            var text = r.text
-            if trim.dropAttachmentPlaceholders, r.hadAttachment {
-                text = stripPlaceholders(text)
-                if text.isEmpty { continue }
-            }
+            let strip = trim.dropAttachmentPlaceholders && r.hadAttachment
+            if strip, stripPlaceholders(r.text).isEmpty { continue }
             // Whole-message redaction? Either an explicit nil-range redaction, or
             // a span that covers the entire (pre-trim) text. nil-guid records can
             // never be redacted.
@@ -536,7 +600,7 @@ public enum Transcript {
             }
             emit.append(
                 Emit(
-                    date: r.date, speaker: r.speaker, text: text,
+                    date: r.date, speaker: r.speaker, text: r.text, stripPlaceholders: strip,
                     reactions: trim.dropReactions ? [] : r.reactions,
                     hadAttachment: r.hadAttachment, guid: r.guid, whole: whole))
         }
@@ -695,7 +759,8 @@ public enum Transcript {
             // splice here is byte-identical to what `renderedBody` (the `.jsonl` +
             // downstream-formatter path) produces.
             let allReps = Self.bodyReplacements(
-                source: sourceNS, guid: guid, redactions: redactions, aliases: aliases)
+                source: sourceNS, guid: guid, redactions: redactions, aliases: aliases,
+                stripPlaceholders: r.stripPlaceholders)
 
             // Build the transformed body (pre-indentation) by splicing every
             // replacement; with no replacements this returns `r.text` unchanged
