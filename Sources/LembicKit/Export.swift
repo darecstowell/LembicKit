@@ -374,26 +374,48 @@ extension Export {
     public static func unredactedPreparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
+        prepare(records, scope: scope, redactions: nil)
+    }
+
+    /// The one prepare step behind both prepared-record APIs: date filter, identity
+    /// scrub, trim, and speaker aliases. With `redactions`, each body is also
+    /// redacted and name-aliased, and a whole-message redaction drops the record.
+    static func prepare(
+        _ records: [MessageRecord], scope: Scope, redactions: RedactionSet?
+    ) -> [MessageRecord] {
         var scope = scope
         let filtered = Self.identityScrubbed(
             Self.unredactedRecords(records, scope: scope), scope: &scope)
-        // The PN alias map is built from the date-filtered set — the same input
-        // `compactText`/`jsonLines` see — so the speaker numbering is identical.
+        // Built from the date-filtered set, as `compactText`/`jsonLines` do, so the
+        // PN numbering matches.
         let aliases =
             scope.anonymizeSpeakers
             ? Transcript.anonymizationMap(for: filtered, knownNames: scope.knownNames) : [:]
+        let body: (MessageRecord, Bool) -> String?
+        if let redactions {
+            let effective = Self.effectiveRedactions(
+                manual: redactions, records: filtered, scope: scope)
+            let names =
+                scope.anonymizeSpeakers
+                ? NameMatcher(aliases: aliases, knownNames: scope.knownNames) : nil
+            body = { record, strip in
+                Transcript.renderedBody(
+                    of: record, redactions: effective, names: names, stripPlaceholders: strip)
+            }
+        } else {
+            body = { record, strip in
+                strip ? Transcript.stripPlaceholders(record.text) : record.text
+            }
+        }
 
         var out: [MessageRecord] = []
         out.reserveCapacity(filtered.count)
         for record in filtered {
-            var text = record.text
-            if scope.trim.dropAttachmentPlaceholders, record.hadAttachment {
-                text = Transcript.stripPlaceholders(text)
-                // Attachment-only message → nothing remains → drop it (matches
-                // `compactText`'s `if text.isEmpty { continue }`).
-                if text.isEmpty { continue }
-            }
-
+            // An attachment-only message is dropped, as `compactText` skips it. Every
+            // splice uses the SOURCE offsets, so a strip never shifts a redaction.
+            let strip = scope.trim.dropAttachmentPlaceholders && record.hadAttachment
+            if strip, Transcript.stripPlaceholders(record.text).isEmpty { continue }
+            guard let text = body(record, strip) else { continue }
             out.append(prepared(record, text: text, scope: scope, aliases: aliases))
         }
         return out
@@ -486,38 +508,7 @@ extension Export {
     public static func preparedRedactedRecords(
         _ records: [MessageRecord], scope: Scope, redactions: RedactionSet
     ) -> [MessageRecord] {
-        // The same date-filtered slice the renderer scans, so the scrubber fold and
-        // the body render see exactly what is exported.
-        var scope = scope
-        let filtered = Self.identityScrubbed(
-            Self.unredactedRecords(records, scope: scope), scope: &scope)
-        let effective = Self.effectiveRedactions(
-            manual: redactions, records: filtered, scope: scope)
-        // The speaker→PN map, built from the date-filtered set so the in-body alias
-        // numbering matches `compactText`/`jsonLines` exactly. Empty when not
-        // anonymizing (so `renderedBody` aliases nothing).
-        let aliases =
-            scope.anonymizeSpeakers
-            ? Transcript.anonymizationMap(for: filtered, knownNames: scope.knownNames) : [:]
-        let names =
-            scope.anonymizeSpeakers
-            ? NameMatcher(aliases: aliases, knownNames: scope.knownNames) : nil
-
-        var out: [MessageRecord] = []
-        out.reserveCapacity(filtered.count)
-        for record in filtered {
-            // Trim, redactions, and in-body aliases all splice the SOURCE text in one
-            // pass, so a stripped placeholder can never shift a redaction span.
-            // nil ⇒ whole-message redacted ⇒ drop the row.
-            let strip = scope.trim.dropAttachmentPlaceholders && record.hadAttachment
-            if strip, Transcript.stripPlaceholders(record.text).isEmpty { continue }
-            guard
-                let body = Transcript.renderedBody(
-                    of: record, redactions: effective, names: names, stripPlaceholders: strip)
-            else { continue }
-            out.append(prepared(record, text: body, scope: scope, aliases: aliases))
-        }
-        return out
+        prepare(records, scope: scope, redactions: redactions)
     }
 
     /// Render an already-extracted, in-memory record set (the in-memory caller path: extract
