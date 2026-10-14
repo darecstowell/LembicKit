@@ -31,6 +31,9 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ### Fixed
 
+- Voice-note transcriptions show. A voice note with a transcription renders as
+  `[audio: "This is a test"]` instead of `[audio]`. The decoder now reads the
+  attribute runs after the message string (lembickit.md F8).
 - Group events no longer tell a false story. A group photo or chat background
   change reads "X changed the group photo" (or removed it, or changed the chat
   background) instead of "X left", a member's number change reads "X changed

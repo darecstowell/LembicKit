@@ -74,7 +74,7 @@ struct GroupStitchTests {
             handleLabels: Self.labels,
             personKeys: [5: "+15555550104", 6: "+15555550104"])
         #expect(groups.count == 1, "one group, not one per handle")
-        let climbing = try? #require(groups.first)
+        let climbing = groups.first
         #expect(climbing?.chatIDs == [12, 13])
         #expect(climbing?.participants.count == 3, "Sam is one participant")
         let sam = climbing?.participants.first { $0.handleIDs.contains(5) }

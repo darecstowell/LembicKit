@@ -182,7 +182,9 @@ public struct Extractor: Sendable {
         attachments: [AttachmentInfo],
         payload: Data? = nil
     ) -> (text: String, hadAttachment: Bool) {
-        let raw = attributedBody.flatMap(AttributedBody.decode) ?? (fallbackText ?? "")
+        let body = attributedBody.flatMap(AttributedBody.parse)
+        let raw = body?.text ?? fallbackText ?? ""
+        let objects = body?.objects ?? []
         let placeholders = attachments.map(\.placeholder)
         var hadAttachment = false
 
@@ -190,7 +192,12 @@ public struct Extractor: Sendable {
         var out = parts[0]
         var index = 0
         for i in 1..<parts.count {
-            let placeholder = index < placeholders.count ? placeholders[index] : nil
+            var placeholder = index < placeholders.count ? placeholders[index] : nil
+            if index < objects.count,
+                let words = transcription(objects[index][AttributedBody.audioTranscriptionKey])
+            {
+                placeholder = "[audio: \"\(words)\"]"
+            }
             index += 1
             if let placeholder {
                 out += " " + placeholder + " "
@@ -211,6 +218,15 @@ public struct Extractor: Sendable {
             out = out.isEmpty ? token : out + " " + token
         }
         return (out, hadAttachment)
+    }
+
+    /// A voice note's transcription on one line, or nil when there is none.
+    static func transcription(_ words: String?) -> String? {
+        guard let words else { return nil }
+        let line = collapseSpaceRuns(
+            words.split(whereSeparator: \.isNewline).joined(separator: " ")
+        ).trimmingCharacters(in: .whitespaces)
+        return line.isEmpty ? nil : line
     }
 
     /// Per line: collapse runs of space/tab to one space, strip edges; then
