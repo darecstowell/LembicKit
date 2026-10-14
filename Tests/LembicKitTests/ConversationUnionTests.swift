@@ -85,4 +85,24 @@ struct ConversationUnionTests {
             grouped.first?.targetHandles == [3, 73],
             "grouped: union holds both handle ROWIDs")
     }
+
+    /// A 1:1 chat with two `chat_handle_join` rows counts each message once and
+    /// reports its smallest handle.
+    @Test func twoHandleRowsDoNotDoubleTheCount() throws {
+        let sql =
+            Fixtures.fullSchema + """
+                INSERT INTO handle (ROWID, id) VALUES (4,'+15551230004'),(5,'+15551230005');
+                INSERT INTO chat (ROWID, style, chat_identifier, service_name) VALUES (1,45,NULL,'iMessage');
+                INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1,5),(1,4);
+                INSERT INTO message (ROWID, guid, date, is_from_me, handle_id, service, text) VALUES
+                    (1,'a',100,0,4,'iMessage','one'),
+                    (2,'b',200,1,0,'iMessage','two'),
+                    (3,'c',300,0,5,'iMessage','three');
+                INSERT INTO chat_message_join (chat_id, message_id) VALUES (1,1),(1,2),(1,3);
+                """
+        let summaries = try Fixtures.openChatDB(populating: sql).conversationSummaries()
+        #expect(summaries.map(\.messageCount) == [3])
+        #expect(summaries.map(\.handleID) == [4])
+        #expect(summaries.map(\.identifier) == ["+15551230004"])
+    }
 }

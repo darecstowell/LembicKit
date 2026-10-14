@@ -217,6 +217,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   no longer removes `CA-90210` style codes (F25).
 - A seconds-era `message.date` too large to scale to nanoseconds is an unknown
   date, in Swift and in the SQL sort, instead of wrapping to a wrong date.
+- A 1:1 chat with more than one `chat_handle_join` row no longer counts each
+  message once per row, and its summary uses the smallest handle ROWID.
 
 ### Performance
 

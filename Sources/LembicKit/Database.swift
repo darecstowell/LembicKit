@@ -250,6 +250,8 @@ public final class ChatDatabase: @unchecked Sendable {
                            COUNT(*) cnt, \(Self.ownerAddresses(cols)) me
                     FROM chat c
                     JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+                        AND chj.handle_id = (SELECT MIN(handle_id) FROM chat_handle_join
+                                             WHERE chat_id = c.ROWID)
                     \(handleJoin)
                     JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                     JOIN message m ON m.ROWID = cmj.message_id
