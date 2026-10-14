@@ -78,6 +78,67 @@ public enum AttributedBody {
         return Body(text: text, runs: attributeRuns(items[(start + 1)...]))
     }
 
+    /// The body string read straight from the bytes, for the common layout: the
+    /// first class is `NSString` or `NSMutableString`, then its parent reference and
+    /// a `+` UTF-8 run. Nil for any other layout; the full decoder then runs.
+    static func plainText(_ data: Data) -> String? {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String? in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            let n = bytes.count
+            var i = 16
+            while i < n {
+                let nameLength: Int
+                if bytes[i] == 8, i + 9 <= n, matches(bytes, at: i + 1, nsString) {
+                    nameLength = 8
+                } else if bytes[i] == 15, i + 16 <= n, matches(bytes, at: i + 1, nsMutableString) {
+                    nameLength = 15
+                } else {
+                    i += 1
+                    continue
+                }
+                var j = i + 1 + nameLength + 1  // name, then the class version
+                // A parent class written inline (NSMutableString, then NSString) is
+                // not the string yet; the scan moves on to the parent's name.
+                guard j + 4 <= n, bytes[j] >= 0x92, bytes[j + 1] == 0x84, bytes[j + 2] == 0x01,
+                    bytes[j + 3] == 0x2B
+                else {
+                    i += 1
+                    continue
+                }
+                j += 4
+                let length: Int
+                switch bytes[j] {
+                case 0x81:
+                    guard j + 3 <= n else { return nil }
+                    length = Int(bytes[j + 1]) | Int(bytes[j + 2]) << 8
+                    j += 3
+                case 0x82:
+                    guard j + 5 <= n else { return nil }
+                    length = (0..<4).reduce(0) { $0 | Int(bytes[j + 1 + $1]) << (8 * $1) }
+                    j += 5
+                case let short where short < 0x80:
+                    length = Int(short)
+                    j += 1
+                default:
+                    return nil
+                }
+                guard j + length <= n else { return nil }
+                return String(
+                    bytes: UnsafeBufferPointer(rebasing: bytes[j..<(j + length)]), encoding: .utf8)
+            }
+            return nil
+        }
+    }
+
+    private static let nsString = Array("NSString".utf8)
+    private static let nsMutableString = Array("NSMutableString".utf8)
+
+    private static func matches(_ bytes: UnsafeBufferPointer<UInt8>, at start: Int, _ name: [UInt8])
+        -> Bool
+    {
+        name.indices.allSatisfy { bytes[start + $0] == name[$0] }
+    }
+
     /// The string from a blob the decoder rejects: the bytes after the first
     /// `NSString` class, clamped to the blob and cut at the first invalid UTF-8.
     /// `isComplete` is false when bytes the blob declares are missing.

@@ -52,3 +52,15 @@ struct TranscriptionTests {
         #expect(text == "[audio]")
     }
 }
+
+@Suite("plain text fast path")
+struct PlainTextFastPathTests {
+    @Test func fastPathMatchesTheFullDecoder() {
+        let long = String(repeating: "long body ", count: 40)
+        for text in ["hi", "🎉🎉", "NS inside text", long, "", "a\u{FFFC}b"] {
+            let blob = TypedStreamFixture.body(text)
+            #expect(AttributedBody.plainText(blob) == AttributedBody.parse(blob)?.text, "\(text)")
+        }
+        #expect(AttributedBody.plainText(Data("not a stream".utf8)) == nil)
+    }
+}

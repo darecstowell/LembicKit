@@ -268,7 +268,7 @@ public struct Extractor: Sendable {
         var unused = Array(attachments.indices)
         var hadAttachment = false
 
-        let parts = raw.components(separatedBy: "\u{FFFC}")
+        let parts = hasObjectMark(raw) ? raw.components(separatedBy: "\u{FFFC}") : [raw]
         var out = parts[0]
         for i in 1..<parts.count {
             let attributes = i - 1 < objects.count ? objects[i - 1] : [:]
@@ -311,6 +311,21 @@ public struct Extractor: Sendable {
         return (out, hadAttachment, flags)
     }
 
+    /// True when `text` holds a U+FFFC (UTF-8 EF BF BC), checked on raw bytes.
+    static func hasObjectMark(_ text: String) -> Bool {
+        var view = text.utf8.makeIterator()
+        var state = 0
+        while let byte = view.next() {
+            switch (state, byte) {
+            case (_, 0xEF): state = 1
+            case (1, 0xBF): state = 2
+            case (2, 0xBC): return true
+            default: state = 0
+            }
+        }
+        return false
+    }
+
     static let unreadableMarker = "[message could not be read]"
     static let incompleteMarker = "[message may be incomplete]"
     static let unknownTypeMarker = "[unknown message type]"
@@ -321,7 +336,7 @@ public struct Extractor: Sendable {
 
     /// The part indexes `message_summary_info` lists as unsent (its `rp` key).
     static func unsentParts(_ summaryInfo: Data?) -> Set<Int> {
-        guard let summaryInfo,
+        guard let summaryInfo, summaryInfo.range(of: Data("rp".utf8)) != nil,
             let plist = try? PropertyListSerialization.propertyList(from: summaryInfo, format: nil),
             let parts = (plist as? [String: Any])?["rp"] as? [Any]
         else { return [] }
@@ -347,6 +362,10 @@ public struct Extractor: Sendable {
         }
         let fallback = fallbackText ?? ""
         guard let blob, !blob.isEmpty else { return (fallback, [], []) }
+        // Most bodies are one plain string with no object marks, so no runs are needed.
+        if let text = AttributedBody.plainText(blob), !text.isEmpty, !hasObjectMark(text) {
+            return (text, [], [])
+        }
         if let body = AttributedBody.parse(blob) {
             if !body.text.isEmpty { return (body.text, body.objects, []) }
             return (fallback, [], fallback.isEmpty ? [] : .incomplete)
@@ -394,10 +413,25 @@ public struct Extractor: Sendable {
     /// strip the whole text. Matches the Python prototype's
     /// `re.sub(r"[ \t]+", " ", ln).strip()` + outer `.strip()`.
     static func normalizeWhitespace(_ s: String) -> String {
+        if isNormalized(s) { return s }
         let lines = s.components(separatedBy: "\n").map { line in
             collapseSpaceRuns(line).trimmingCharacters(in: pythonWhitespace)
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: pythonWhitespace)
+    }
+
+    /// True when `normalizeWhitespace` would return `s` unchanged: one line, no
+    /// tab, no double space, and no whitespace at either end.
+    static func isNormalized(_ s: String) -> Bool {
+        guard let first = s.unicodeScalars.first, let last = s.unicodeScalars.last,
+            !pythonWhitespace.contains(first), !pythonWhitespace.contains(last)
+        else { return s.isEmpty }
+        var previous: UInt8 = 0
+        for byte in s.utf8 {
+            if byte == 0x0A || byte == 0x09 || (byte == 0x20 && previous == 0x20) { return false }
+            previous = byte
+        }
+        return true
     }
 
     static func collapseSpaceRuns(_ s: String) -> String {
@@ -479,6 +513,8 @@ public struct Extractor: Sendable {
         var pollOptions: [String: [String: String]] = [:]
 
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        // Columns are read by position below (name lookups cost a string compare
+        // per column per row): keep this SELECT order and the indexes in step.
         let rows = try Row.fetchCursor(
             db,
             sql: """
@@ -499,15 +535,15 @@ public struct Extractor: Sendable {
             arguments: StatementArguments(ids))
 
         while let row = try rows.next() {
-            let rowid: Int64 = row["rid"]
+            let rowid: Int64 = row[0]
             if seenROWIDs.contains(rowid) { continue }
             seenROWIDs.insert(rowid)
 
-            let rawDate: Int64? = row["date"]
+            let rawDate: Int64? = row[2]
             let dateNS = Self.nanoseconds(rawDate) ?? 0
-            let isFromMe = (row["is_from_me"] as Int64? ?? 0) != 0
-            let handleID: Int64 = row["handle_id"] ?? 0
-            let amt: Int64 = row["amt"] ?? 0
+            let isFromMe = (row[3] as Int64? ?? 0) != 0
+            let handleID: Int64 = row[4] ?? 0
+            let amt: Int64 = row[9] ?? 0
             // Floor to whole seconds: chat.db dates carry sub-second precision,
             // and DateFormatter rounds fractional seconds up while strftime
             // (the Python reference) truncates them.
@@ -519,21 +555,21 @@ public struct Extractor: Sendable {
             let kind = Reactions.kind(of: amt)
             if kind != .message {
                 let reactor = isFromMe || isNoteToSelf ? "me" : isOneToOne ? "them" : "h\(handleID)"
-                let (target, part) = Reactions.target(from: row["amg"] as String? ?? "")
+                let (target, part) = Reactions.target(from: row[10] as String? ?? "")
                 let key: String
                 let emoji: String
                 var isRemove = false
                 switch kind {
                 case .tapback(let base, let remove):
                     key = (base == 2007 ? "sticker-tapback:" : "tapback:") + reactor
-                    emoji = Reactions.emoji(base: base, custom: row["ame"])
+                    emoji = Reactions.emoji(base: base, custom: row[11])
                     isRemove = remove
                 case .sticker:
                     key = "sticker:\(rowid)"
                     emoji = "sticker"
                 case .vote:
                     let options = pollOptions[target] ?? [:]
-                    let chosen = (row["payload_data"] as Data?).map(AppMessage.votes(from:)) ?? []
+                    let chosen = (row[14] as Data?).map(AppMessage.votes(from:)) ?? []
                     let texts = chosen.compactMap { options[$0] }
                     key = "vote:" + reactor
                     emoji = texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", ")
@@ -558,21 +594,21 @@ public struct Extractor: Sendable {
             }
             sequence += 1
 
-            let itemType: Int64 = row["item_type"] ?? 0
+            let itemType: Int64 = row[8] ?? 0
             if Self.systemItemTypes.contains(itemType) { continue }
-            let isRetracted = (row["date_retracted"] as Int64? ?? 0) != 0
-            let payload: Data? = isRetracted ? nil : row["payload_data"]
+            let isRetracted = (row[13] as Int64? ?? 0) != 0
+            let payload: Data? = isRetracted ? nil : row[14]
             var (text, hadAttachment, flags) =
                 isRetracted
                 ? (Self.unsentMarker, false, MessageRecord.Flags.unsent)
                 : Self.renderText(
-                    attributedBody: row["attributedBody"],
-                    fallbackText: (row["text"] as Data?).map {
+                    attributedBody: row[7],
+                    fallbackText: (row[6] as Data?).map {
                         String(decoding: $0, as: UTF8.self)
                     },
-                    balloonBundleID: row["balloon_bundle_id"],
+                    balloonBundleID: row[12],
                     attachments: attachmentMap[rowid] ?? [],
-                    payload: payload, unsentParts: Self.unsentParts(row["msi"]))
+                    payload: payload, unsentParts: Self.unsentParts(row[18]))
             if itemType != 0 {
                 guard !text.isEmpty, text != Self.unreadableMarker else {
                     skipped.append(SkippedMessage(date: knownDate, reason: .unknownType))
@@ -590,18 +626,18 @@ public struct Extractor: Sendable {
                 continue
             }
             let canMark = isFromMe && !flags.contains(.unsent)
-            if canMark, (row["error"] as Int64? ?? 0) != 0 {
+            if canMark, (row[15] as Int64? ?? 0) != 0 {
                 text += " " + Self.notDeliveredMarker
                 flags.insert(.notDelivered)
             } else if canMark,
                 Self.isPendingScheduled(
-                    scheduleType: row["schedule_type"], isSent: row["is_sent"])
+                    scheduleType: row[17], isSent: row[16])
             {
                 text += " " + Self.scheduledMarker
                 flags.insert(.scheduled)
             }
 
-            let guid: String? = row["guid"]
+            let guid: String? = row[1]
             if let guid, let payload, let poll = AppMessage.poll(from: payload) {
                 pollOptions[guid] = Dictionary(
                     poll.options.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
@@ -611,7 +647,7 @@ public struct Extractor: Sendable {
                 date: date,
                 speaker: label(isFromMe: isFromMe, handleID: handleID),
                 isTarget: !isFromMe && isOneToOne && !isNoteToSelf,
-                service: row["service"],
+                service: row[5],
                 text: text,
                 hadAttachment: hadAttachment,
                 reactions: [],
