@@ -186,4 +186,68 @@ struct RedactionLeakTests {
             records: [rec("p1", 0, "Them", "hi")], number: "+18165550188", formats: [.txt])
         #expect((out.txt ?? "").contains("Them = +18165550188"))
     }
+
+    // MARK: - F5: a flag covers the whole secret
+
+    private func afterRedactAll(_ rs: [MessageRecord]) -> Export.Rendered {
+        let first = Export.render(records: rs, number: "x", formats: [.txt])
+        return Export.render(
+            records: rs, number: "x", formats: [.txt], redactions: redactAll(first.detected))
+    }
+
+    @Test("Redact All on a private key hides the whole block")
+    func privateKeyBlockIsCovered() {
+        let body =
+            "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
+            + "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK"
+        let key = "-----BEGIN RSA PRIVATE KEY-----\n\(body)\n-----END RSA PRIVATE KEY-----"
+        let pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF3abcDEFghiJKL\n=Ab12"
+        let after = afterRedactAll([
+            rec("k1", 0, "Me", "here: \(key) thanks"), rec("k2", 1, "Me", pgp),
+        ])
+        let txt = after.txt ?? ""
+        #expect(!txt.contains("MIIEow") && !txt.contains("gnTxK") && !txt.contains("END RSA"))
+        #expect(!txt.contains("lQOYBF3") && !txt.contains("=Ab12"))
+        #expect(txt.contains("Me: here: [redacted] thanks"))
+        #expect(after.result?.highlightMarks.isEmpty == true)
+    }
+
+    @Test("a private key split over messages is flagged through the END line")
+    func splitPrivateKeyIsCovered() {
+        let rs = [
+            rec("s1", 0, "Me", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA"),
+            rec("s2", 1, "Me", "BG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUxOQ"),
+            rec("s3", 2, "Me", "AAAAIOt4jRiJ\n-----END OPENSSH PRIVATE KEY-----\nok that's it"),
+            rec("s4", 3, "Me", "unrelated"),
+        ]
+        let txt = afterRedactAll(rs).txt ?? ""
+        for leak in ["b3BlbnNz", "BG5vbmUA", "AAAAIOt4", "END OPENSSH"] {
+            #expect(!txt.contains(leak), "hides \(leak)")
+        }
+        #expect(txt.contains("ok that's it") && txt.contains("unrelated"))
+    }
+
+    @Test("Redact All on a password hides the whole value")
+    func passwordValueIsCovered() {
+        let cases: [(String, String)] = [
+            ("password: P@ss.w0rd!", "P@ss.w0rd!"),
+            ("password is \"correct horse battery staple\"", "correct horse battery staple"),
+            ("password is “correct horse battery staple”", "correct horse battery staple"),
+            ("my password's hunter2", "hunter2"),
+            ("my password’s hunter2", "hunter2"),
+            ("DB_PASSWORD=Hunter2!x", "Hunter2!x"),
+            ("password: it'sMine,ok", "it'sMine,ok"),
+            ("pw = 'it's mine' ok", "it's mine"),
+            ("password is hunter2.", "hunter2."),
+        ]
+        for (i, (text, value)) in cases.enumerated() {
+            let r = rec("w\(i)", i, "Them", text)
+            let hits = SecretDetector.detect(in: [r]).filter { $0.category == .password }
+            let ns = text as NSString
+            let covered = hits.map { ns.substring(with: NSRange($0.range)) }
+            #expect(covered.contains { $0.contains(value) }, "\(text) → \(covered)")
+            let txt = afterRedactAll([r]).txt ?? ""
+            #expect(!txt.contains(value), "\(text) leaks after Redact All")
+        }
+    }
 }

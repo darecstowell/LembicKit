@@ -43,30 +43,63 @@ public enum SecretDetector {
             if enabled.contains(.standingCode) { detectStandingCodes(ns, whole, guid, into: &out) }
             if enabled.contains(.bankAccount) { detectBankNumbers(ns, whole, guid, into: &out) }
         }
+        if enabled.contains(.apiKey) { keyBlockContinuations(records, into: &out) }
         return out
+    }
+
+    /// A private key whose END line is not in the BEGIN message: flag the next
+    /// messages from the same sender, whole, through the one with the END line
+    /// (at most 20 messages, each within 10 minutes of the one before).
+    private static func keyBlockContinuations(
+        _ records: [MessageRecord], into out: inout [DetectedSecret]
+    ) {
+        for (i, r) in records.enumerated() where r.guid != nil {
+            let ns = r.text as NSString
+            guard let last = privateKeyBlocks(ns).last, !last.closed else { continue }
+            var previous = r
+            for next in records.dropFirst(i + 1).prefix(20) {
+                guard next.speaker == r.speaker,
+                    next.date.timeIntervalSince(previous.date) <= 600, let guid = next.guid
+                else { break }
+                let body = next.text as NSString
+                let endLine = body.range(of: "-----END ", options: .literal)
+                if endLine.location == NSNotFound {
+                    out.append(
+                        DetectedSecret(guid: guid, range: 0..<body.length, category: .apiKey))
+                    previous = next
+                    continue
+                }
+                let tail = endLine.location + endLine.length
+                let close = body.range(
+                    of: "-----", options: .literal,
+                    range: NSRange(location: tail, length: body.length - tail))
+                let end = close.location == NSNotFound ? body.length : close.location + close.length
+                out.append(DetectedSecret(guid: guid, range: 0..<end, category: .apiKey))
+                break
+            }
+        }
     }
 
     // MARK: - Password-in-context
     //
-    // Trigger lexicon (case-insensitive, word-boundaried): password, passwd,
-    // pwd, pw, passcode, passphrase.
+    // Trigger lexicon (case-insensitive, letter-boundaried so `DB_PASSWORD=` still
+    // matches): password, passwd, pwd, pw, passcode, passphrase.
     //
-    // Separator: a quoted value may use a relaxed/optional separator, but a BARE
-    // value REQUIRES a real separator (`is`, `:`, or `=`) gluing it to the
-    // trigger — otherwise the next prose word ("password please") would leak.
+    // A quoted value may use a relaxed/optional separator, but a BARE value
+    // REQUIRES a real separator (`is`, `:`, `=`, or `'s`) gluing it to the
+    // trigger, otherwise the next prose word ("password please") would leak.
     //
-    // Value rule: a run of non-whitespace characters, optionally wrapped in
-    // matching quotes/backticks, that stops at whitespace or sentence
-    // punctuation (`.` `,` `;` `!` `?`) — these are not plausible inside a typed
-    // secret token and usually end the sentence. A trailing quote/backtick is
-    // not part of the value. The emitted range covers the VALUE only (the thing
-    // that leaks), never the keyword.
+    // The flag must cover the WHOLE value: a bare value runs to the next white
+    // space (sentence marks included; over-covering one `.` is harmless, leaving
+    // the last character of a password is not). A quoted value runs to its
+    // closing quote, spaces included. The range never covers the keyword.
     private static let passwordRegex: NSRegularExpression = {
-        // Group 2: quoted value (no closing quote captured). Group 3: bare value.
+        // Group 1: `'s` separator + bare value. Group 2: opening quote. Group 3: bare value.
         let pattern =
-            #"(?i)\b(?:password|passwd|passcode|passphrase|pwd|pw)\b"#  // trigger
-            + #"(?:(?:\s*(?:is\b\s*)?[:=]?\s*)(["'`])([^"'`\s]+)"#  // relaxed sep + quoted value
-            + #"|(?:\s+is\b\s*[:=]?|\s*[:=])\s*([^\s.,;!?'"`]+))"#  // required sep + bare value
+            #"(?i)(?<![A-Za-z])(?:password|passwd|passcode|passphrase|pwd|pw)(?![A-Za-z])"#
+            + #"(?:\s*['’]s\s+([^\s]+)"#
+            + #"|\s*(?:is\b\s*)?[:=]?\s*(["'`“‘])"#
+            + #"|(?:\s+is\b\s*[:=]?|\s*[:=])\s*([^\s"'`“‘][^\s]*))"#
         return try! NSRegularExpression(pattern: pattern)
     }()
 
@@ -75,16 +108,48 @@ public enum SecretDetector {
     ) {
         passwordRegex.enumerateMatches(in: ns as String, range: whole) { match, _, _ in
             guard let match else { return }
-            // Prefer the quoted-value capture (group 2), else the bare value (group 3).
-            let valueRange =
-                match.range(at: 2).location != NSNotFound
-                ? match.range(at: 2)
-                : match.range(at: 3)
+            let quote = match.range(at: 2)
+            let valueRange: NSRange
+            if quote.location != NSNotFound {
+                valueRange = quotedValue(ns, openingQuoteAt: quote.location)
+            } else if match.range(at: 1).location != NSNotFound {
+                valueRange = match.range(at: 1)
+            } else {
+                valueRange = match.range(at: 3)
+            }
             guard valueRange.location != NSNotFound, valueRange.length > 0 else { return }
             out.append(
                 DetectedSecret(
                     guid: guid, range: Range(valueRange)!, category: .password))
         }
+    }
+
+    /// The value after an opening quote: up to the closing quote (a quote that is not
+    /// followed by a letter or digit, so `'it's mine'` stays whole), else to the end
+    /// of the line. Capped at 128 UTF-16 units.
+    static func quotedValue(_ ns: NSString, openingQuoteAt q: Int) -> NSRange {
+        let start = q + 1
+        let limit = Swift.min(ns.length, start + 128)
+        var k = start
+        while k < limit {
+            let c = ns.character(at: k)
+            if c == 0x0A || c == 0x0D { break }
+            if isQuote(c), k > start {
+                let next = k + 1 < ns.length ? ns.character(at: k + 1) : 0x20
+                if !isAlphanumeric(next) { return NSRange(location: start, length: k - start) }
+            }
+            k += 1
+        }
+        return NSRange(location: start, length: k - start)
+    }
+
+    private static func isQuote(_ c: unichar) -> Bool {
+        [0x22, 0x27, 0x60, 0x201C, 0x201D, 0x2018, 0x2019].contains(c)
+    }
+
+    private static func isAlphanumeric(_ c: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(c) else { return true }
+        return CharacterSet.alphanumerics.contains(scalar)
     }
 
     // MARK: - US SSN
@@ -385,15 +450,58 @@ public enum SecretDetector {
             // signature are long too; the real-vector test JWTs sit well above
             // these floors (header tail 17/33, payload 27/46, signature 22/43).
             #"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"#,
-            // PEM private-key header (any key type).
-            #"-----BEGIN [A-Z ]*PRIVATE KEY-----"#,
         ]
         return patterns.map { try! NSRegularExpression(pattern: $0) }
     }()
 
+    // A private key block: BEGIN through the matching END line. With no END line
+    // the flag runs to the end of the message (`keyBlockContinuations` follows a
+    // key that is split over several messages).
+    private static let privateKeyBeginRegex = try! NSRegularExpression(
+        pattern: #"-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----"#)
+
+    private static func privateKeyBlocks(_ ns: NSString) -> [(range: NSRange, closed: Bool)] {
+        var out: [(NSRange, Bool)] = []
+        var searchFrom = 0
+        while searchFrom < ns.length {
+            let rest = NSRange(location: searchFrom, length: ns.length - searchFrom)
+            guard let begin = privateKeyBeginRegex.firstMatch(in: ns as String, range: rest)
+            else { break }
+            let after = begin.range.location + begin.range.length
+            let endLine = ns.range(
+                of: "-----END ", options: .literal,
+                range: NSRange(location: after, length: ns.length - after))
+            if endLine.location == NSNotFound {
+                out.append(
+                    (
+                        NSRange(
+                            location: begin.range.location, length: ns.length - begin.range.location
+                        ), false
+                    ))
+                break
+            }
+            let close = ns.range(
+                of: "-----", options: .literal,
+                range: NSRange(
+                    location: endLine.location + endLine.length,
+                    length: ns.length - endLine.location - endLine.length))
+            let end = close.location == NSNotFound ? ns.length : close.location + close.length
+            out.append(
+                (
+                    NSRange(location: begin.range.location, length: end - begin.range.location),
+                    close.location != NSNotFound
+                ))
+            searchFrom = end
+        }
+        return out
+    }
+
     private static func detectAPIKeys(
         _ ns: NSString, _ whole: NSRange, _ guid: String, into out: inout [DetectedSecret]
     ) {
+        for block in privateKeyBlocks(ns) {
+            out.append(DetectedSecret(guid: guid, range: Range(block.range)!, category: .apiKey))
+        }
         for regex in apiKeyRegexes {
             regex.enumerateMatches(in: ns as String, range: whole) { match, _, _ in
                 guard let match, match.range.length > 0 else { return }
