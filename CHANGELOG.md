@@ -8,6 +8,21 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- A seconds-era `message.date` too large to scale to nanoseconds is an unknown
+  date, in Swift and in the SQL sort, instead of wrapping to a wrong date.
+- A 1:1 chat with more than one `chat_handle_join` row no longer counts each
+  message once per row, and its summary uses the smallest handle ROWID.
+- Conversations with the same last-message date sort by `id`, so the list
+  order no longer changes from run to run.
+- `lembic-cli export` (direct, `--union`, and `--sample`) renders the listed
+  conversation through `Export.render`, so a note to self drops its echoes and a
+  group chat gets per-speaker labels and the group header. With `--contacts` it
+  reads Contacts once and passes the names to `Export(database:contacts:)` (new
+  optional `contacts:` on both `Export` initializers). `--sample --contacts` now
+  reads Contacts too (a TCC prompt is possible) and prints resolved names.
+
 ## [0.4.0] - 2026-10-14
 
 ### Security

@@ -469,11 +469,20 @@ public struct Extractor: Sendable {
     static let appleEpochOffset: TimeInterval = 978_307_200  // 1970→2001
 
     /// A raw `message.date` in nanoseconds since 2001. Old rows store seconds, so a
-    /// value below 10^12 is scaled up. Nil for 0, NULL, and negative values.
+    /// value below 10^12 is scaled up. Nil for 0, NULL, negative values, and
+    /// seconds too large to scale.
     static func nanoseconds(_ raw: Int64?) -> Int64? {
         guard let raw, raw > 0 else { return nil }
-        return raw >= 1_000_000_000_000
-            ? raw : raw.multipliedReportingOverflow(by: 1_000_000_000).partialValue
+        if raw >= 1_000_000_000_000 { return raw }
+        return raw <= maxSeconds ? raw * 1_000_000_000 : nil
+    }
+
+    /// The largest seconds-era `message.date` that fits in Int64 nanoseconds.
+    static let maxSeconds: Int64 = 9_223_372_036
+
+    /// SQL true when `column` holds a known date; the twin of `nanoseconds`.
+    static func knownDate(_ column: String) -> String {
+        "(\(column) > 0 AND (\(column) <= \(maxSeconds) OR \(column) >= 1000000000000))"
     }
 
     /// A raw `message.date` as a `Date`, or nil when it is unknown.
@@ -482,8 +491,10 @@ public struct Extractor: Sendable {
     }
 
     /// `m.date` in nanoseconds for `ORDER BY`, so seconds-era rows sort by time.
+    /// Seconds too large to scale sort as 0, like other unknown dates.
     static let sortableDate =
-        "CASE WHEN m.date < 1000000000000 THEN m.date * 1000000000 ELSE m.date END"
+        "CASE WHEN m.date >= 1000000000000 THEN m.date WHEN m.date > \(maxSeconds) THEN 0"
+        + " ELSE m.date * 1000000000 END"
 
     /// Ordered emitted records for one chat (reactions netted, attachments
     /// attached) — a single-chat convenience over `extractConversation`.

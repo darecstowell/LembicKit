@@ -72,27 +72,41 @@ struct Export: ParsableCommand {
             throw ValidationError("--target-handles must contain at least one handle ROWID")
         }
 
-        // Route through the engine seam: this opens in place, PREFLIGHTS (the
-        // schema guard the old CLI skipped), and owns the read-only db for the run.
-        let exporter = try LembicKit.Export(chatDBAt: URL(fileURLWithPath: databasePath))
-        defer { exporter.close() }
-        let db = exporter.database
+        // Open in place, read-only, and preflight (the schema guard) before any read.
+        let db = try ChatDatabase(at: URL(fileURLWithPath: databasePath))
+        defer { db.cleanUp() }
+        try db.preflight()
 
         let counts = try db.counts()
         print(
             "[db] \(Transcript.comma(counts.messages)) messages · \(Transcript.comma(counts.handles)) handles · \(Transcript.comma(counts.chats)) chats"
         )
 
-        let handleLabels = try db.handleLabels()
-        let extractor = Extractor(targetHandles: handles, handleLabels: handleLabels)
+        // Contacts are read once. The direct export fails on a Contacts error; the
+        // union and sample paths fall back to bare identifiers.
+        var info: ContactsMap.ContactInfo?
+        if contacts {
+            if union || sample != nil {
+                info = try? ContactsMap.buildContactInfo()
+            } else {
+                info = try ContactsMap.buildContactInfo()
+            }
+        }
+        let exporter = LembicKit.Export(
+            database: db, contacts: contacts ? (info?.names ?? [:]) : nil)
+        let listing = try Listing(database: db, contacts: info)
 
         if union {
-            try runUnion(exporter: exporter, extractor: extractor, handles: handles)
+            try runUnion(exporter: exporter, listing: listing, handles: handles)
             return
         }
 
+        let conv = listing.conversation(chatIDs: [chatID], handles: handles, number: number)
+
         if let sample {
-            let records = try db.read { try extractor.extractChat($0, chatID: chatID) }
+            let records = try exporter.render(
+                conv, formats: [], detect: false, resolveContacts: contacts
+            ).unredactedRecords
             for r in records.prefix(sample) {
                 print("\(r.date) \(r.speaker): \(r.text)")
             }
@@ -102,20 +116,13 @@ struct Export: ParsableCommand {
             return
         }
 
-        if contacts {
-            let names = try ContactsMap.buildContactInfo().names
+        if let names = info?.names {
+            let handleLabels = try db.handleLabels()
             let (_, matched) = ContactsMap.resolve(handleLabels: handleLabels, contacts: names)
             print(
                 "[contacts] \(Transcript.comma(names.count)) handles in Contacts · matched \(matched)/\(handleLabels.count) chat.db handles"
             )
         }
-
-        // The gated direct export takes explicit ROWIDs by design,
-        // so synthesize a minimal Conversation from the flags for the seam.
-        let conv = Conversation(
-            id: number, displayName: number, chatIDs: [chatID], targetHandles: handles,
-            identifiers: [number], lastMessageDate: .distantPast, messageCount: 0,
-            primaryIdentifier: number, isContact: false)
 
         // First render to detect; if --redact-detected, build redactions from the
         // detected secrets and re-render the .txt with them applied.
@@ -155,7 +162,7 @@ struct Export: ParsableCommand {
     /// (Σ per-chat vs union, de-dupes, per-service split) since there is no
     /// byte-for-byte reference for this path.
     private func runUnion(
-        exporter: LembicKit.Export, extractor: Extractor, handles: Set<Int64>
+        exporter: LembicKit.Export, listing: Listing, handles: Set<Int64>
     ) throws {
         let db = exporter.database
         let chats = try db.oneToOneChats(forHandles: handles)
@@ -164,13 +171,19 @@ struct Export: ParsableCommand {
             return
         }
         let ids = Set(chats.map(\.chatID))
-        let records = try db.read { try extractor.extractConversation($0, chatIDs: ids) }
+        func extract(_ chatIDs: Set<Int64>) throws -> [MessageRecord] {
+            let conv = listing.conversation(chatIDs: chatIDs, handles: handles, number: number)
+            return try exporter.render(
+                conv, formats: [], detect: false, resolveContacts: contacts
+            ).unredactedRecords
+        }
+        let records = try extract(ids)
 
         print("[union] handles \(handles.sorted()) → \(chats.count) one-to-one chat(s):")
         var sumIndividual = 0
         var biggest = (id: Int64(0), count: -1)
         for c in chats {
-            let n = try db.read { try extractor.extractChat($0, chatID: c.chatID).count }
+            let n = try extract([c.chatID]).count
             sumIndividual += n
             if n > biggest.count { biggest = (c.chatID, n) }
             print(
@@ -207,13 +220,7 @@ struct Export: ParsableCommand {
         let base = URL(fileURLWithPath: outDir, isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
 
-        // Route the file writes through the redaction-aware seam (the diagnostic
-        // prints above stay on the raw extractor). The union's chat ROWIDs feed a
-        // synthesized Conversation so detection + optional --redact-detected apply.
-        let conv = Conversation(
-            id: number, displayName: number, chatIDs: ids, targetHandles: handles,
-            identifiers: [number], lastMessageDate: .distantPast, messageCount: 0,
-            primaryIdentifier: number, isContact: false)
+        let conv = listing.conversation(chatIDs: ids, handles: handles, number: number)
         let scope = LembicKit.Export.Scope(anonymizeSpeakers: anonymize)
         var out = try exporter.render(
             conv, formats: [.txt, .jsonl], scope: scope, redactions: RedactionSet(), detect: true,
@@ -235,6 +242,53 @@ struct Export: ParsableCommand {
             "[union] wrote union_\(digits).txt/.jsonl to \(base.path) · "
                 + "\(Transcript.comma(out.detected.count)) secrets flagged"
                 + (redactDetected ? " (redacted in .txt)" : ""))
+    }
+}
+
+/// The listed conversations, read once, and the per-chat message counts.
+struct Listing {
+    let conversations: [Conversation]
+    let names: [String: String]
+    let counts: [Int64: Int]
+
+    init(database db: ChatDatabase, contacts info: ContactsMap.ContactInfo?) throws {
+        conversations = try Conversations.list(
+            from: db, resolvingContacts: false, contacts: info?.names,
+            contactIDs: info?.contactIDs, ownerIdentifiers: info?.ownerIdentifiers ?? [])
+        names = info?.names ?? [:]
+        let pairs =
+            try db.conversationSummaries().map { ($0.chatID, $0.messageCount) }
+            + db.groupConversationSummaries().map { ($0.chatID, $0.messageCount) }
+        counts = Dictionary(pairs, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The listed conversation that holds `chatIDs`, narrowed to them, with group
+    /// speaker labels filled. A chat with no real message gets a bare 1:1 from the flags.
+    func conversation(chatIDs: Set<Int64>, handles: Set<Int64>, number: String) -> Conversation {
+        let count = chatIDs.reduce(0) { $0 + (counts[$1] ?? 0) }
+        // Chats that span two listed conversations take the first one's metadata.
+        guard let base = conversations.first(where: { !$0.chatIDs.isDisjoint(with: chatIDs) })
+        else {
+            return Conversation(
+                id: number, displayName: number, chatIDs: chatIDs, targetHandles: handles,
+                identifiers: [number], lastMessageDate: .distantPast, messageCount: count,
+                primaryIdentifier: number, isContact: false)
+        }
+        let labels = Conversations.groupSpeakerLabels(participants: base.participants, names: names)
+        let participants = base.participants.map { member in
+            var member = member
+            member.label = labels[member.handleID]
+            return member
+        }
+        return Conversation(
+            id: base.id, displayName: base.displayName, chatIDs: chatIDs,
+            targetHandles: base.isGroup ? base.targetHandles : handles,
+            identifiers: base.identifiers, lastMessageDate: base.lastMessageDate,
+            messageCount: count, primaryIdentifier: number, isContact: base.isContact,
+            isGroup: base.isGroup, participants: participants, groupName: base.groupName,
+            legacyIDs: base.legacyIDs, chatGUIDs: base.chatGUIDs,
+            firstMessageDate: base.firstMessageDate, ownerHandles: base.ownerHandles,
+            isNoteToSelf: base.isNoteToSelf)
     }
 }
 

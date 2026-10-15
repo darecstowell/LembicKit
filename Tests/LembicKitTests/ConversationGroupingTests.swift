@@ -150,4 +150,29 @@ struct ConversationGroupingTests {
             emails.first?.identifiers == ["a@b.com"],
             "email identifiers are lowercased to one normalized member")
     }
+
+    /// Conversations with the same date sort by `id`, so the order is stable.
+    @Test func equalDatesSortByID() throws {
+        let tied = (1...12).map { summary($0, "+1816555\(1000 + $0)", $0, date: 100) }
+        let grouped = Conversations.group(tied, contacts: [:])
+        #expect(grouped.map(\.id) == grouped.map(\.id).sorted())
+
+        var sql = Fixtures.fullSchema
+        for i in 1...12 {
+            sql += """
+                INSERT INTO handle (ROWID, id) VALUES (\(i),'+1816555\(1000 + i)');
+                INSERT INTO chat (ROWID, style, chat_identifier, service_name)
+                    VALUES (\(i),45,'+1816555\(1000 + i)','iMessage');
+                INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (\(i),\(i));
+                INSERT INTO message (ROWID, guid, date, is_from_me, handle_id, service, text)
+                    VALUES (\(i),'m\(i)',0,0,\(i),'iMessage','no date');
+                INSERT INTO chat_message_join (chat_id, message_id) VALUES (\(i),\(i));
+
+                """
+        }
+        let listed = try Conversations.list(
+            from: Fixtures.openChatDB(populating: sql), resolvingContacts: false, region: "US")
+        #expect(listed.count == 12)
+        #expect(listed.map(\.id) == listed.map(\.id).sorted())
+    }
 }

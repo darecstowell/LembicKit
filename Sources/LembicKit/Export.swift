@@ -26,15 +26,23 @@ public final class Export: @unchecked Sendable {
     /// Contacts were resolved, shared across every `render` on this instance (the
     /// labels are the same for the whole db).
     private var cachedLabels: [Bool: [Int64: String]] = [:]
+    /// Names a caller already read from Contacts, used instead of reading them again.
+    private let contacts: [String: String]?
 
     /// Wrap an already-open `ChatDatabase` (the long-lived caller path: it opens
     /// once, lists, and renders against the same instance). Does NOT preflight; assumes the
     /// caller already did, matching how `Conversations.list(from:)` expects a
     /// preflighted db. The wrapper does NOT own the db lifecycle (`close()` /
     /// `deinit` leave it open), so a caller's session db is never cleaned up out
-    /// from under it.
-    public init(database: ChatDatabase) {
+    /// from under it. `contacts` (normalized handle to name) replaces the Contacts
+    /// read when a render resolves Contacts.
+    public init(database: ChatDatabase, contacts: [String: String]?) {
         self.database = database
+        self.contacts = contacts
+    }
+
+    public convenience init(database: ChatDatabase) {
+        self.init(database: database, contacts: nil)
     }
 
     /// One-shot path (CLI / scripts): open in place + preflight + own the db. The
@@ -42,9 +50,14 @@ public final class Export: @unchecked Sendable {
     /// never copied). Throws `UnsupportedSchemaError` from preflight (fail-closed)
     /// — this is the schema guard the CLI skipped before it routed through `Export`.
     public convenience init(chatDBAt url: URL) throws {
+        try self.init(chatDBAt: url, contacts: nil)
+    }
+
+    /// `init(chatDBAt:)` with names already read from Contacts.
+    public convenience init(chatDBAt url: URL, contacts: [String: String]?) throws {
         let db = try ChatDatabase(at: url)
         try db.preflight()  // step 2 — the guard the CLI skips today
-        self.init(database: db)
+        self.init(database: db, contacts: contacts)
         self.ownsDatabase = true
     }
 
@@ -64,7 +77,9 @@ public final class Export: @unchecked Sendable {
         let handleLabels = try database.handleLabels()
         // Only touch Contacts (a TCC-gated request) when the caller opts in, so a
         // CLI export without `--contacts` neither prompts nor silently relabels.
-        let names = resolveContacts ? ((try? ContactsMap.buildContactInfo().names) ?? [:]) : [:]
+        let names =
+            resolveContacts
+            ? (contacts ?? (try? ContactsMap.buildContactInfo().names) ?? [:]) : [:]
         let resolved = ContactsMap.resolve(handleLabels: handleLabels, contacts: names).resolved
         cachedLabels[resolveContacts] = resolved
         return resolved
