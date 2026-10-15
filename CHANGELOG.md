@@ -8,6 +8,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-14
+
 ### Security
 
 - Hiding attachment placeholders no longer shifts redaction offsets onto the
@@ -317,7 +319,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 - A schema-sanity guard that fails closed on an unsupported `chat.db` rather than
   producing a quietly wrong export.
 
-[Unreleased]: https://github.com/darecstowell/LembicKit/compare/0.3.1...HEAD
+[Unreleased]: https://github.com/darecstowell/LembicKit/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/darecstowell/LembicKit/compare/0.3.1...0.4.0
 [0.3.1]: https://github.com/darecstowell/LembicKit/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/darecstowell/LembicKit/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/darecstowell/LembicKit/compare/0.1.0...0.2.0
