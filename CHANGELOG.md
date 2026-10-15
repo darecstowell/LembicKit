@@ -8,6 +8,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Fixed
 
 - A seconds-era `message.date` too large to scale to nanoseconds is an unknown
@@ -361,7 +363,8 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
 - A schema-sanity guard that fails closed on an unsupported `chat.db` rather than
   producing a quietly wrong export.
 
-[Unreleased]: https://github.com/darecstowell/LembicKit/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/darecstowell/LembicKit/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/darecstowell/LembicKit/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/darecstowell/LembicKit/compare/0.3.1...0.4.0
 [0.3.1]: https://github.com/darecstowell/LembicKit/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/darecstowell/LembicKit/compare/0.2.0...0.3.0
