@@ -152,9 +152,7 @@ struct SecretScrubberTests {
 
     @Test("an enabled scrubber redacts the value in BOTH .txt and .jsonl")
     func integrationThroughExportRender() {
-        let recs = [
-            Fixtures.exportRec(0, "Them", "my email is jane@example.com call me"),
-        ]
+        let recs = [Fixtures.exportRec(0, "Them", "my email is jane@example.com call me")]
         var scope = Export.Scope()
         scope.enabledScrubbers = [.email]
         let out = Export.render(

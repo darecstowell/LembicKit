@@ -335,8 +335,30 @@ extension Export {
         unredactedRecords(records, scope: scope)
     }
 
-    /// The scoped records with trim and speaker aliases baked in, for a format that
-    /// reads `MessageRecord`s. The text is not redacted.
+    /// The **fully-prepared** record set for a scope — the date-filtered slice with
+    /// `scope.trim` and `scope.anonymizeSpeakers` already baked into each record, so
+    /// a downstream formatter that consumes `MessageRecord`s directly
+    /// (a tabular or document layout) honors those toggles using the engine's
+    /// OWN logic — never a re-implemented transform that could drift (an
+    /// alternate format is "an alternate output of the same scoped+redacted data").
+    ///
+    /// This reuses the exact helpers `Transcript.compactText` applies, in the same
+    /// order, so the prepared records carry the identical relabeling/trim the
+    /// `.txt`/`.jsonl` paths show:
+    ///
+    /// 1. **Date filter** (shared `records(_:scope:)` path).
+    /// 2. **`trim.dropAttachmentPlaceholders`** — on a record with an attachment,
+    ///    strip the typed placeholders from `text` via `Transcript.stripPlaceholders`;
+    ///    a record left empty (an attachment-only message) is **dropped**, exactly as
+    ///    `compactText` skips it.
+    /// 3. **`trim.dropReactions`** — clear the reactions.
+    /// 4. **`anonymizeSpeakers`** — relabel `speaker` AND each reaction's `by`
+    ///    through `Transcript.anonymizationMap` (built from the date-filtered set, so
+    ///    the `PN` numbering matches the `.txt`/`.jsonl` map exactly).
+    ///
+    /// Redaction is NOT applied here. Redaction offsets point into the SOURCE text,
+    /// so they do not fit a trimmed body: an output that needs redaction must use
+    /// `preparedRedactedRecords`, never `redactedText` on these records.
     @available(*, deprecated, renamed: "unredactedPreparedRecords(_:scope:)")
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
@@ -494,9 +516,9 @@ extension Export {
         return QuoteReactions.carryRedactions(effective, records: records)
     }
 
-    /// The scoped records with trim, aliases, and every redaction baked into `text`, for
-    /// a format that reads `MessageRecord`s; a hidden message is dropped. Without a roster,
-    /// `Member N` can differ from the `.txt`: prefer the `conversation:` form.
+    /// The scoped records with trim, aliases, and every redaction baked into `text`; a hidden
+    /// message is dropped. Hand them to a formatter with an empty `RedactionSet()`. Without a
+    /// roster, `Member N` can differ from the `.txt`: prefer the `conversation:` form.
     public static func preparedRedactedRecords(
         _ records: [MessageRecord], scope: Scope, redactions: RedactionSet
     ) -> [MessageRecord] {

@@ -83,6 +83,10 @@ struct RosterParityTests {
                 Self.records, conversation: Self.conversation, labels: Self.labels, scope: scope,
                 redactions: RedactionSet())
             #expect(Transcript.jsonLines(records: redacted) == expected, "\(scope)")
+            let txt = Self.rendered(scope).txt ?? ""
+            for r in redacted {
+                #expect(txt.contains(" \(r.speaker): \(r.text)"), "\(scope)")
+            }
             let unredacted = Export.unredactedPreparedRecords(
                 Self.records, conversation: Self.conversation, labels: Self.labels, scope: scope)
             #expect(Self.speakers(unredacted) == Self.speakers(expected), "\(scope)")
