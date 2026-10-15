@@ -228,7 +228,7 @@ extension Export {
     /// `highlightMarks` because the renderer is handed both at once.
     ///
     /// - Note: BOTH outputs honor `redactions`: the `.txt` redaction-aware
-    ///   renderer and `jsonLines` share one `applySpanRedactions` splice, so under
+    ///   renderer and `jsonLines` share one `BodySplice` splice, so under
     ///   `--redact-detected` neither the `.txt` nor the `.jsonl` leaks a redacted
     ///   span. A whole-message redaction tombstones the `.txt` line and OMITS the
     ///   jsonl object (jsonl has no tombstone token — see `jsonLines`).
@@ -285,8 +285,8 @@ extension Export {
                 add(label, labels[p.handleID])
             }
         } else {
-            add("Them", conversation.displayName)
-            for handle in conversation.targetHandles { add("Them", labels[handle]) }
+            add(Transcript.themLabel, conversation.displayName)
+            for handle in conversation.targetHandles { add(Transcript.themLabel, labels[handle]) }
         }
         return names
     }

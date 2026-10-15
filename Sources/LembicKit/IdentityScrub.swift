@@ -21,7 +21,7 @@ struct IdentityScrub: Sendable {
         var next = 1
         var seen: Set<String> = []
         for label in labels where seen.insert(label).inserted {
-            guard label != Transcript.meLabel, label != "Them",
+            guard label != Transcript.meLabel, label != Transcript.themLabel,
                 Self.isIdentifier(label, categories) || !Self.secrets(label, detectors).isEmpty
             else { continue }
             while taken.contains("Member \(next)") { next += 1 }
@@ -83,9 +83,9 @@ struct IdentityScrub: Sendable {
             out = out.replacingOccurrences(of: label, with: neutral)
         }
         let ns = out as NSString
-        let reps = Transcript.mergedRedactionSubstitutions(
+        let reps = BodySplice.mergedRedactions(
             SecretScrubber.ranges(in: ns, categories: categories) + Self.secrets(out, detectors))
-        return Transcript.applyReplacements(to: ns, reps)
+        return BodySplice.apply(to: ns, reps)
     }
 
     func records(_ rs: [MessageRecord]) -> [MessageRecord] {
