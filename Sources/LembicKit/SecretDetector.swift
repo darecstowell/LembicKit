@@ -19,50 +19,14 @@ public enum SecretDetector {
         in records: [MessageRecord], enabled: Set<SecretCategory>, gated: Bool
     ) -> [DetectedSecret] {
         guard !enabled.isEmpty else { return [] }
-        var out: [DetectedSecret] = []
-        var bodies: [NormalizedText?] = []
-        var profiles: [TextProfile?] = []
-        bodies.reserveCapacity(records.count)
-        profiles.reserveCapacity(records.count)
-        for (i, r) in records.enumerated() {
-            guard let guid = r.guid else {
-                bodies.append(nil)
-                profiles.append(nil)
-                continue
-            }
-            let body = TextNormalizer.normalize(r.text)
-            let profile = TextProfile(body.text, gated: gated)
-            bodies.append(body)
-            profiles.append(profile)
-            var context: NSString?
-            var contextProfile: TextProfile?
-            if i > 0, let previous = bodies[i - 1],
-                r.date.timeIntervalSince(records[i - 1].date) <= 900
-            {
-                context = previous.text
-                contextProfile = profiles[i - 1]
-            }
-            var scan = DetectorScan(
-                body.text, context: context, enabled: enabled, profile: profile,
-                contextProfile: contextProfile)
-            scan.run()
-            for hit in scan.hits {
-                if let range = body.sourceRange(hit.range) {
-                    out.append(DetectedSecret(guid: guid, range: range, category: hit.category))
-                }
-            }
-            if enabled.contains(.invisibleInk), r.isInvisibleInk {
-                let length = (r.text as NSString).length
-                if length > 0 {
-                    out.append(
-                        DetectedSecret(guid: guid, range: 0..<length, category: .invisibleInk))
-                }
-            }
-        }
-        joinedMessages(records, bodies, profiles, enabled: enabled, gated: gated, into: &out)
-        answersToQuestions(records, bodies, profiles, enabled: enabled, into: &out)
-        if enabled.contains(.apiKey) { keyBlockContinuations(records, profiles, into: &out) }
-        return consolidated(out)
+        let input = DetectorInput(records, gated: gated)
+        let all = 0..<records.count
+        return input.assemble(
+            all, enabled: enabled,
+            single: { input.single($0, from: 0, enabled: enabled) },
+            joined: { input.joined($0, in: all, enabled: enabled).hits },
+            answer: { input.answer($0, enabled: enabled) },
+            keyBlock: { input.keyBlock($0, upTo: records.count).hits })
     }
 
     /// Detection over one string with no message anchor (a group name, a label, an
@@ -131,69 +95,6 @@ public enum SecretDetector {
 
     // MARK: - Secrets split over messages
 
-    /// Up to four messages in a row from one sender, each within five minutes of the
-    /// one before, are joined with a space, and the card, SSN, IBAN, and seed rules run
-    /// on the joined text. A hit maps back to every message it touches.
-    private static func joinedMessages(
-        _ records: [MessageRecord], _ bodies: [NormalizedText?], _ profiles: [TextProfile?],
-        enabled: Set<SecretCategory>, gated: Bool, into out: inout [DetectedSecret]
-    ) {
-        let rules = enabled.intersection([.creditCard, .ssn, .bankAccount, .seedPhrase])
-        guard !rules.isEmpty, records.count > 1 else { return }
-        for start in 0..<(records.count - 1) {
-            guard let first = bodies[start], first.text.length <= 200 else { continue }
-            var count = 1
-            var digits = profiles[start]?.digits ?? 0
-            var bip = profiles[start]?.bipWords ?? 0
-            while start + count < records.count, count < 4 {
-                let end = start + count
-                guard let next = bodies[end], next.text.length <= 200,
-                    records[end].speaker == records[start].speaker,
-                    records[end].date.timeIntervalSince(records[end - 1].date) <= 300
-                else { break }
-                digits += profiles[end]?.digits ?? 0
-                bip += profiles[end]?.bipWords ?? 0
-                count += 1
-            }
-            guard count > 1, digits >= 6 || bip >= 10 else { continue }
-            var parts: [(index: Int, offset: Int, body: NormalizedText)] = [(start, 0, first)]
-            var joined = first.text as String
-            for end in (start + 1)..<(start + count) {
-                guard let next = bodies[end] else { break }
-                joined += " "
-                parts.append((end, (joined as NSString).length, next))
-                joined += next.text as String
-            }
-            let ns = joined as NSString
-            var context: NSString?
-            if start > 0, let previous = bodies[start - 1],
-                records[start].date.timeIntervalSince(records[start - 1].date) <= 900
-            {
-                context = previous.text
-            }
-            var scan = DetectorScan(
-                ns, context: context, enabled: rules, profile: TextProfile(ns, gated: gated),
-                contextProfile: context == nil ? nil : profiles[start - 1])
-            scan.run()
-            for hit in scan.hits {
-                let lo = hit.range.location
-                let hi = hit.range.location + hit.range.length
-                let touched = parts.filter { part in
-                    lo < part.offset + part.body.text.length && hi > part.offset
-                }
-                guard touched.count > 1 else { continue }
-                for part in touched {
-                    let a = Swift.max(lo, part.offset) - part.offset
-                    let b = Swift.min(hi, part.offset + part.body.text.length) - part.offset
-                    guard b > a, let guid = records[part.index].guid,
-                        let range = part.body.sourceRange(NSRange(location: a, length: b - a))
-                    else { continue }
-                    out.append(DetectedSecret(guid: guid, range: range, category: hit.category))
-                }
-            }
-        }
-    }
-
     // MARK: - An answer to a question about a password or code
 
     static let question = regex(
@@ -208,40 +109,6 @@ public enum SecretDetector {
     static let codeAnswer = regex(
         #"^\s*(?:(?:it['’]?s|it\s+is|its|try)\s+)?([*#]?[0-9]{4,8}#?(?=[\s,.!]|$)|[*#]?[0-9]{3}#?(?=\s*$))"#
     )
-
-    private static func answersToQuestions(
-        _ records: [MessageRecord], _ bodies: [NormalizedText?], _ profiles: [TextProfile?],
-        enabled: Set<SecretCategory>, into out: inout [DetectedSecret]
-    ) {
-        guard enabled.contains(.password) || enabled.contains(.standingCode), records.count > 1
-        else { return }
-        let words: [StaticString] = ["pas", "pw", "wifi", "wi-fi", "pin", "code", "comb"]
-        for i in 0..<(records.count - 1) {
-            guard let q = bodies[i], q.text.length <= 200, profiles[i]?.hasAny(words) ?? false,
-                question.found(in: q.text),
-                asks.found(in: q.text), let a = bodies[i + 1], let guid = records[i + 1].guid,
-                records[i + 1].date.timeIntervalSince(records[i].date) <= 1800
-            else { continue }
-            let whole = NSRange(location: 0, length: a.text.length)
-            let category: SecretCategory
-            let v: NSRange
-            if codeQuestion.found(in: q.text),
-                let m = codeAnswer.firstMatch(in: a.text as String, range: whole)
-            {
-                category = .standingCode
-                v = m.range(at: 1)
-            } else if let m = answer.firstMatch(in: a.text as String, range: whole),
-                DetectorScan.plausibleSecret(a.text.substring(with: m.range(at: 1)))
-            {
-                v = m.range(at: 1)
-                category = .password
-            } else {
-                continue
-            }
-            guard enabled.contains(category), let range = a.sourceRange(v) else { continue }
-            out.append(DetectedSecret(guid: guid, range: range, category: category))
-        }
-    }
 
     // MARK: - Quoted values and private key blocks
 
@@ -301,40 +168,6 @@ public enum SecretDetector {
             searchFrom = end
         }
         return out
-    }
-
-    /// A private key whose END line is not in the BEGIN message: flag the next
-    /// messages from the same sender, whole, through the one with the END line
-    /// (at most 20 messages, each within 10 minutes of the one before).
-    private static func keyBlockContinuations(
-        _ records: [MessageRecord], _ profiles: [TextProfile?], into out: inout [DetectedSecret]
-    ) {
-        for (i, r) in records.enumerated() where profiles[i]?.has("-----begin") ?? false {
-            guard let last = privateKeyBlocks(TextNormalizer.normalize(r.text).text).last,
-                !last.closed
-            else { continue }
-            var previous = r
-            for next in records.dropFirst(i + 1).prefix(20) {
-                guard next.speaker == r.speaker,
-                    next.date.timeIntervalSince(previous.date) <= 600, let guid = next.guid
-                else { break }
-                let body = next.text as NSString
-                let endLine = body.range(of: "-----END ", options: .literal)
-                if endLine.location == NSNotFound {
-                    out.append(
-                        DetectedSecret(guid: guid, range: 0..<body.length, category: .apiKey))
-                    previous = next
-                    continue
-                }
-                let tail = endLine.location + endLine.length
-                let close = body.range(
-                    of: "-----", options: .literal,
-                    range: NSRange(location: tail, length: body.length - tail))
-                let end = close.location == NSNotFound ? body.length : close.location + close.length
-                out.append(DetectedSecret(guid: guid, range: 0..<end, category: .apiKey))
-                break
-            }
-        }
     }
 
     // MARK: - Seed phrases (BIP-39)
