@@ -82,8 +82,7 @@ extension Export {
             if stop.isSet { throw CancellationError() }
             var scope = scope
             if let named {
-                scope.knownNames = Export.knownNames(
-                    for: named.conversation, labels: named.labels, adding: scope.knownNames)
+                scope = Export.named(scope, conversation: named.conversation, labels: named.labels)
             }
             let bounds = isSorted ? indices(scope.dateRange) : nil
             let filtered =

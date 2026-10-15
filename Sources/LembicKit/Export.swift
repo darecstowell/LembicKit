@@ -254,9 +254,7 @@ extension Export {
         } else {
             systemEvents = []
         }
-        var named = scope
-        named.knownNames = Export.knownNames(
-            for: conversation, labels: labels, adding: scope.knownNames)
+        let named = Export.named(scope, conversation: conversation, labels: labels)
         return Export.render(
             records: extraction.records, number: conversation.primaryIdentifier,
             formats: formats, scope: named, redactions: redactions, detect: detect,
@@ -337,30 +335,8 @@ extension Export {
         unredactedRecords(records, scope: scope)
     }
 
-    /// The **fully-prepared** record set for a scope — the date-filtered slice with
-    /// `scope.trim` and `scope.anonymizeSpeakers` already baked into each record, so
-    /// a downstream formatter that consumes `MessageRecord`s directly
-    /// (a tabular or document layout) honors those toggles using the engine's
-    /// OWN logic — never a re-implemented transform that could drift (an
-    /// alternate format is "an alternate output of the same scoped+redacted data").
-    ///
-    /// This reuses the exact helpers `Transcript.compactText` applies, in the same
-    /// order, so the prepared records carry the identical relabeling/trim the
-    /// `.txt`/`.jsonl` paths show:
-    ///
-    /// 1. **Date filter** (shared `records(_:scope:)` path).
-    /// 2. **`trim.dropAttachmentPlaceholders`** — on a record with an attachment,
-    ///    strip the typed placeholders from `text` via `Transcript.stripPlaceholders`;
-    ///    a record left empty (an attachment-only message) is **dropped**, exactly as
-    ///    `compactText` skips it.
-    /// 3. **`trim.dropReactions`** — clear the reactions.
-    /// 4. **`anonymizeSpeakers`** — relabel `speaker` AND each reaction's `by`
-    ///    through `Transcript.anonymizationMap` (built from the date-filtered set, so
-    ///    the `PN` numbering matches the `.txt`/`.jsonl` map exactly).
-    ///
-    /// Redaction is NOT applied here. Redaction offsets point into the SOURCE text,
-    /// so they do not fit a trimmed body: an output that needs redaction must use
-    /// `preparedRedactedRecords`, never `redactedText` on these records.
+    /// The scoped records with trim and speaker aliases baked in, for a format that
+    /// reads `MessageRecord`s. The text is not redacted.
     @available(*, deprecated, renamed: "unredactedPreparedRecords(_:scope:)")
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
@@ -368,23 +344,52 @@ extension Export {
         unredactedPreparedRecords(records, scope: scope)
     }
 
-    /// `preparedRecords` under a name that says the text is not redacted. Anonymize
-    /// hides only `scope.knownNames`; pass `Export.knownNames(for:labels:)` for them.
+    /// `preparedRecords` under a name that says the text is not redacted. Without a
+    /// roster, `Member N` can differ from the `.txt`: prefer the `conversation:` form.
     public static func unredactedPreparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
-        prepare(records, scope: scope, redactions: nil)
+        unredactedPreparedRecords(records, scope: scope, group: nil)
+    }
+
+    /// `unredactedPreparedRecords` with the identity scrub `render` gives `group`, so
+    /// `Member N` labels and speaker aliases match the `.txt` of the same export.
+    public static func unredactedPreparedRecords(
+        _ records: [MessageRecord], scope: Scope, group: Transcript.GroupRenderInfo?
+    ) -> [MessageRecord] {
+        prepare(records, scope: scope, redactions: nil, group: group)
+    }
+
+    /// `unredactedPreparedRecords` as the instance `render(_:)` prepares `conversation`:
+    /// its roster, and the names `labels` give its speakers added to `scope.knownNames`.
+    public static func unredactedPreparedRecords(
+        _ records: [MessageRecord], conversation: Conversation, labels: [Int64: String],
+        scope: Scope
+    ) -> [MessageRecord] {
+        prepare(
+            records, scope: named(scope, conversation: conversation, labels: labels),
+            redactions: nil, group: groupRenderInfo(for: conversation))
+    }
+
+    /// `scope` with the names `labels` give the speakers of `conversation`.
+    static func named(_ scope: Scope, conversation: Conversation, labels: [Int64: String])
+        -> Scope
+    {
+        var named = scope
+        named.knownNames = knownNames(for: conversation, labels: labels, adding: scope.knownNames)
+        return named
     }
 
     /// The one prepare step behind both prepared-record APIs: date filter, identity
     /// scrub, trim, and speaker aliases. With `redactions`, each body is also
     /// redacted and name-aliased, and a whole-message redaction drops the record.
     static func prepare(
-        _ records: [MessageRecord], scope: Scope, redactions: RedactionSet?
+        _ records: [MessageRecord], scope: Scope, redactions: RedactionSet?,
+        group: Transcript.GroupRenderInfo?
     ) -> [MessageRecord] {
         var scope = scope
         let filtered = Self.identityScrubbed(
-            Self.unredactedRecords(records, scope: scope), scope: &scope)
+            Self.unredactedRecords(records, scope: scope), scope: &scope, group: group)
         // Built from the date-filtered set, as `compactText`/`jsonLines` do, so the
         // PN numbering matches.
         let aliases =
@@ -446,11 +451,13 @@ extension Export {
     }
 
     /// `records` with identifier speaker labels and reaction authors made neutral
-    /// when a scrubber is on (the same labels `render` shows).
-    static func identityScrubbed(_ records: [MessageRecord], scope: inout Scope) -> [MessageRecord]
-    {
+    /// when a scrubber is on (the same labels `render` shows for `group`).
+    static func identityScrubbed(
+        _ records: [MessageRecord], scope: inout Scope, group: Transcript.GroupRenderInfo? = nil
+    ) -> [MessageRecord] {
         let identity = IdentityScrub(
-            categories: scope.enabledScrubbers, detectors: scope.enabledDetectors, records: records)
+            categories: scope.enabledScrubbers, detectors: scope.enabledDetectors, records: records,
+            group: group)
         scope.knownNames = identity.knownNames(scope.knownNames)
         return identity.records(records)
     }
@@ -487,36 +494,33 @@ extension Export {
         return QuoteReactions.carryRedactions(effective, records: records)
     }
 
-    /// The fully-prepared, fully-redacted record set for downstream formatters
-    /// (CSV/XLSX/PDF/DOCX) — the parity fix that closes the scrubber data
-    /// leak. A sibling of `preparedRecords` that goes one step further: it bakes the
-    /// **rendered body** into each record's `text` so the formatters consume
-    /// already-clean text and CANNOT leak a scrubbed value or a raw in-body
-    /// participant name in any binary format.
-    ///
-    /// Pipeline, all via the engine's OWN logic (never re-implemented by the caller):
-    /// 1. **Date filter + trim + speaker-alias** — `preparedRecords(_:scope:)`
-    ///    (so the downstream-formatter path honors `trim`/`anonymizeSpeakers` identically).
-    /// 2. **Effective redactions** — `manual` ∪ enabled scrubbers, via
-    ///    `effectiveRedactions` (the SAME fold `Export.render` uses).
-    /// 3. **Unified body render** — each record's `text` becomes
-    ///    `Transcript.renderedBody` (redaction spans → `[redacted]` AND, under
-    ///    anonymize, in-body name mentions → `PN`) in ONE pass over the ORIGINAL
-    ///    offsets, so an alias before a redaction never desyncs the span. A
-    ///    whole-message-redacted record returns `nil` → it is **dropped** (the row
-    ///    omission the formatters used to do themselves).
-    ///
-    /// The returned records carry the FINAL body: a caller hands them to a
-    /// formatter with an **empty** `RedactionSet()` (the redaction is already baked).
-    ///
-    /// - Important: the placeholder strip, the redactions, and the aliases all use
-    ///   the record's source `text` offsets, exactly as `compactText` does.
-    /// - Important: anonymize hides only the names in `scope.knownNames`. Pass
-    ///   `Export.knownNames(for:labels:)` for the conversation, as `render(_:)` does.
+    /// The scoped records with trim, aliases, and every redaction baked into `text`, for
+    /// a format that reads `MessageRecord`s; a hidden message is dropped. Without a roster,
+    /// `Member N` can differ from the `.txt`: prefer the `conversation:` form.
     public static func preparedRedactedRecords(
         _ records: [MessageRecord], scope: Scope, redactions: RedactionSet
     ) -> [MessageRecord] {
-        prepare(records, scope: scope, redactions: redactions)
+        preparedRedactedRecords(records, scope: scope, redactions: redactions, group: nil)
+    }
+
+    /// `preparedRedactedRecords` with the identity scrub `render` gives `group`, so
+    /// `Member N` labels and speaker aliases match the `.txt` of the same export.
+    public static func preparedRedactedRecords(
+        _ records: [MessageRecord], scope: Scope, redactions: RedactionSet,
+        group: Transcript.GroupRenderInfo?
+    ) -> [MessageRecord] {
+        prepare(records, scope: scope, redactions: redactions, group: group)
+    }
+
+    /// `preparedRedactedRecords` as the instance `render(_:)` prepares `conversation`:
+    /// its roster, and the names `labels` give its speakers added to `scope.knownNames`.
+    public static func preparedRedactedRecords(
+        _ records: [MessageRecord], conversation: Conversation, labels: [Int64: String],
+        scope: Scope, redactions: RedactionSet
+    ) -> [MessageRecord] {
+        prepare(
+            records, scope: named(scope, conversation: conversation, labels: labels),
+            redactions: redactions, group: groupRenderInfo(for: conversation))
     }
 
     /// Render an already-extracted, in-memory record set (the in-memory caller path: extract
