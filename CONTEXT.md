@@ -1,6 +1,6 @@
 # LembicKit
 
-LembicKit reads a macOS Messages `chat.db` (SQLite), folds its rows into people-level conversations, and renders LLM-ready transcripts: a compact daily-grouped `.txt` and one JSON object per message (`.jsonl`). It also runs on-device detection of high-harm secrets and reversible redaction over the same message bodies. The package ships a library target (`LembicKit`) and a command-line tool (`lembic-cli`). It targets macOS 14 (Sonoma) and never touches the live Messages store: it copies `chat.db` (and its `-wal`/`-shm` sidecars) to a private temp directory and reads the copy read-only.
+LembicKit reads a macOS Messages `chat.db` (SQLite), folds its rows into people-level conversations, and renders LLM-ready transcripts: a compact daily-grouped `.txt` and one JSON object per message (`.jsonl`). It also runs on-device detection of high-harm secrets and reversible redaction over the same message bodies. The package ships a library target (`LembicKit`) and a command-line tool (`lembic-cli`). It targets macOS 14 (Sonoma) and never touches the live Messages store: it opens `chat.db` read-only in place, reads the live WAL, and copies nothing.
 
 ## Domain glossary
 
@@ -28,7 +28,7 @@ These are the core nouns, drawn from the actual type names.
 
 **Export** (`Export.swift`). The one pipeline seam: open, preflight, list, then extract, detect, and render one conversation. Before this existed, the app and the CLI each reassembled the extract-detect-render sequence by hand and drifted (the CLI shipped transcripts with no redaction). `Export.render` is the single place that ordering lives.
 
-**ChatDatabase** (`Database.swift`). Read-only access to the copied `chat.db` via a GRDB `DatabaseQueue`. Owns the temp copy, exposes the row-level summary queries (`conversationSummaries`, `groupConversationSummaries`, `handleLabels`), and the schema guard.
+**ChatDatabase** (`Database.swift`). Read-only, in-place access to `chat.db` via a GRDB `DatabaseQueue`. Exposes the row-level summary queries (`conversationSummaries`, `groupConversationSummaries`, `handleLabels`), and the schema guard.
 
 **ConversationSummary / GroupConversationSummary** (`Database.swift`). The raw per-chat rows that `Conversations` folds into `Conversation`s. Counts and dates use real messages only (`item_type = 0`, no reactions, no system events).
 
@@ -66,7 +66,7 @@ These are the core nouns, drawn from the actual type names.
 | `Database.swift` | Read-only copied-DB access, row-level summary queries, the schema guard | `ChatDatabase`, `ChatDatabase.requiredSchema`, `schemaProblems`, `preflight`, `SchemaProblem`, `UnsupportedSchemaError`, `ConversationSummary`, `GroupConversationSummary` |
 | `Extractor.swift` | Rows to ordered `MessageRecord`s; speaker labels; attachment splicing; opt-in group system events | `MessageRecord`, `Extractor`, `Extractor.forConversation`, `extractConversation`, `extractSystemEvents` |
 | `Transcript.swift` | Render `.txt` and `.jsonl`; redaction splice; anonymization; render marks for the app | `Transcript.compactText`, `Transcript.jsonLines`, `Transcript.redactedText`, `Transcript.renderedBody`, `RenderResult`, `RenderSpan`, `RedactedMark`, `HighlightMark`, `TrimOptions`, `GroupRenderInfo`, `SystemEvent` |
-| `Export.swift` | The single extract-detect-render pipeline seam, plus prepared-record helpers for alternate output formats | `Export`, `Export.render`, `Export.Scope`, `Export.Format`, `Export.Rendered`, `records`, `preparedRecords`, `effectiveRedactions`, `preparedRedactedRecords` |
+| `Export.swift` | The single extract-detect-render pipeline seam, plus prepared-record helpers for alternate output formats | `Export`, `Export.render`, `Export.Scope`, `Export.Format`, `Export.Rendered`, `unredactedRecords`, `unredactedPreparedRecords`, `effectiveRedactions`, `preparedRedactedRecords` |
 | `Redaction.swift` | Redaction value types and the category enums | `Redaction`, `RedactionSet`, `SecretCategory`, `ScrubberCategory`, `DetectedSecret` |
 | `QuoteReactions.swift` | Moves a quoted message's redactions onto an SMS/RCS tapback that quotes it (`Loved “…”`) | `QuoteReactions` (internal, called from `Export.effectiveRedactions`) |
 | `RedactionAnchor.swift` | Saved redactions with a keyed fingerprint of the covered text, so a changed message moves the anchor or hides the whole message | `RedactionAnchor`, `RedactionSet.anchors(in:key:)`, `RedactionSet.resolve(_:records:key:)` |

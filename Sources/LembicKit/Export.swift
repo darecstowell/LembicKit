@@ -354,7 +354,8 @@ extension Export {
         unredactedPreparedRecords(records, scope: scope)
     }
 
-    /// `preparedRecords` under a name that says the text is not redacted.
+    /// `preparedRecords` under a name that says the text is not redacted. Anonymize
+    /// hides only `scope.knownNames`; pass `Export.knownNames(for:labels:)` for them.
     public static func unredactedPreparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
@@ -465,6 +466,8 @@ extension Export {
     ///
     /// - Important: the placeholder strip, the redactions, and the aliases all use
     ///   the record's source `text` offsets, exactly as `compactText` does.
+    /// - Important: anonymize hides only the names in `scope.knownNames`. Pass
+    ///   `Export.knownNames(for:labels:)` for the conversation, as `render(_:)` does.
     public static func preparedRedactedRecords(
         _ records: [MessageRecord], scope: Scope, redactions: RedactionSet
     ) -> [MessageRecord] {
