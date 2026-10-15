@@ -163,7 +163,7 @@ public struct Extractor: Sendable {
             }
         }
         for handle in conversation.ownerHandles {
-            perSpeaker[handle] = "Me"
+            perSpeaker[handle] = Transcript.meLabel
             rosterHandles.insert(handle)
         }
         return Extractor(targetHandles: [], handleLabels: perSpeaker, rosterHandles: rosterHandles)
@@ -172,8 +172,8 @@ public struct Extractor: Sendable {
     /// "Me", "Them" for any other sender in a 1:1, else the member's label. A
     /// group row whose handle is missing or unknown is "Unknown sender".
     public func label(isFromMe: Bool, handleID: Int64) -> String {
-        if isFromMe || isNoteToSelf { return "Me" }
-        if isOneToOne { return "Them" }
+        if isFromMe || isNoteToSelf { return Transcript.meLabel }
+        if isOneToOne { return Transcript.themLabel }
         guard handleID > 0, let label = handleLabels[handleID] else { return "Unknown sender" }
         return label
     }
@@ -191,7 +191,7 @@ public struct Extractor: Sendable {
     /// a bare `h17`. `handleID == 0` (an actor the row didn't record) or a handle
     /// with no row → nil, so the caller can fall back to a subjectless phrasing.
     func systemEventLabel(isFromMe: Bool, handleID: Int64) -> String? {
-        if isFromMe { return "Me" }
+        if isFromMe { return Transcript.meLabel }
         guard handleID != 0 else { return nil }
         guard let value = handleLabels[handleID] else { return nil }
         // A roster member's value is its already-resolved per-thread label
@@ -215,11 +215,9 @@ public struct Extractor: Sendable {
     /// its attachments once per chat, so links are de-duped by maj.ROWID — a
     /// no-op for a single chat, so the byte-validated path stays identical.
     func loadAttachments(
-        _ db: GRDB.Database, chatIDs: [Int64], schema cols: SchemaColumns
+        _ db: GRDB.Database, chatIDs: [Int64], schema cols: SchemaSnapshot
     ) throws -> [Int64: [AttachmentInfo]] {
-        guard !chatIDs.isEmpty,
-            cols.has("message_attachment_join", "message_id"),
-            cols.has("message_attachment_join", "attachment_id"),
+        guard !chatIDs.isEmpty, cols.has(ChatDatabase.attachmentLinkColumns),
             cols.hasTable("attachment")
         else { return [:] }
         var map: [Int64: [AttachmentInfo]] = [:]
@@ -516,190 +514,190 @@ public struct Extractor: Sendable {
     public func extract(_ db: GRDB.Database, chatIDs: Set<Int64>) throws -> Extraction {
         let ids = chatIDs.sorted()
         guard !ids.isEmpty else { return Extraction(records: [], skipped: []) }
-        let cols = try SchemaColumns.load(db)
-        let attachmentMap = try loadAttachments(db, chatIDs: ids, schema: cols)
-        func m(_ column: String) -> String { cols.column("m", "message", column) }
+        let schema = try SchemaSnapshot.load(db)
+        let attachments = try loadAttachments(db, chatIDs: ids, schema: schema)
+        var state = ExtractionState()
+        try fetchRows(db, chatIDs: ids, schema: schema) { row, sequence in
+            classify(row, sequence: sequence, attachments: attachments, into: &state)
+        }
+        if isNoteToSelf { applyNoteToSelf(&state) }
+        attachReactions(&state)
+        return Extraction(records: state.emitted, skipped: state.skipped)
+    }
 
+    /// What `extract` has built so far, carried through its stages.
+    struct ExtractionState {
         var emitted: [MessageRecord] = []
         var incoming: [Bool] = []
         var skipped: [SkippedMessage] = []
         var indexByGUID: [String: Int] = [:]
         var rawReactions: [RawReaction] = []
+        var pollOptions: [String: [String: String]] = [:]
+    }
+
+    /// Streams each message row once, in date order, with its index among the de-duped rows.
+    func fetchRows(
+        _ db: GRDB.Database, chatIDs ids: [Int64], schema: SchemaSnapshot,
+        _ body: (MessageRow, Int) throws -> Void
+    ) throws {
         var seenROWIDs = Set<Int64>()
         var sequence = 0
-        var pollOptions: [String: [String: String]] = [:]
-
-        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-        // Columns are read by position below (name lookups cost a string compare
-        // per column per row): keep this SELECT order and the indexes in step.
         let rows = try Row.fetchCursor(
-            db,
-            sql: """
-                SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id,
-                       \(m("service")) service, CAST(\(m("text")) AS BLOB) text,
-                       \(m("attributedBody")) attributedBody, \(m("item_type")) item_type,
-                       \(m("associated_message_type")) amt, \(m("associated_message_guid")) amg,
-                       \(m("associated_message_emoji")) ame,
-                       \(m("balloon_bundle_id")) balloon_bundle_id,
-                       \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data,
-                       \(m("error")) error, \(m("is_sent")) is_sent,
-                       \(m("schedule_type")) schedule_type,
-                       \(m("message_summary_info")) msi,
-                       \(m("expressive_send_style_id")) effect
-                FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
-                WHERE cmj.chat_id IN (\(placeholders))
-                ORDER BY \(Self.sortableDate), m.ROWID
-                """,
+            db, sql: MessageRow.query(schema, chatCount: ids.count),
             arguments: StatementArguments(ids))
-
         while let row = try rows.next() {
-            let rowid: Int64 = row[0]
-            if seenROWIDs.contains(rowid) { continue }
-            seenROWIDs.insert(rowid)
-
-            let rawDate: Int64? = row[2]
-            let dateNS = Self.nanoseconds(rawDate) ?? 0
-            let isFromMe = (row[3] as Int64? ?? 0) != 0
-            let handleID: Int64 = row[4] ?? 0
-            let amt: Int64 = row[9] ?? 0
-            // Floor to whole seconds: chat.db dates carry sub-second precision,
-            // and DateFormatter rounds fractional seconds up while strftime
-            // (the Python reference) truncates them.
-            let knownDate = Self.appleDate(rawDate).map {
-                Date(timeIntervalSince1970: $0.timeIntervalSince1970.rounded(.down))
-            }
-            let date = knownDate ?? Date(timeIntervalSince1970: Self.appleEpochOffset)
-
-            let kind = Reactions.kind(of: amt)
-            if kind != .message {
-                let reactor = isFromMe || isNoteToSelf ? "me" : isOneToOne ? "them" : "h\(handleID)"
-                let (target, part) = Reactions.target(from: row[10] as String? ?? "")
-                let key: String
-                let emoji: String
-                var isRemove = false
-                switch kind {
-                case .tapback(let base, let remove):
-                    key = (base == 2007 ? "sticker-tapback:" : "tapback:") + reactor
-                    emoji = Reactions.emoji(base: base, custom: row[11])
-                    isRemove = remove
-                case .sticker:
-                    key = "sticker:\(rowid)"
-                    emoji = "sticker"
-                case .vote:
-                    let options = pollOptions[target] ?? [:]
-                    let chosen = (row[14] as Data?).map(AppMessage.votes(from:)) ?? []
-                    let texts = chosen.compactMap { options[$0] }
-                    key = "vote:" + reactor
-                    emoji = texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", ")
-                case .message, .unknown:
-                    Self.log.notice("skipped a row with associated_message_type \(amt)")
-                    skipped.append(SkippedMessage(date: knownDate, reason: .unknownReaction))
-                    sequence += 1
-                    continue
-                }
-                rawReactions.append(
-                    RawReaction(
-                        dateNS: dateNS,
-                        sequence: sequence,
-                        targetGUID: target,
-                        part: part,
-                        reactorKey: key,
-                        reactorLabel: label(isFromMe: isFromMe, handleID: handleID),
-                        emoji: emoji,
-                        isRemove: isRemove))
-                sequence += 1
-                continue
-            }
+            guard seenROWIDs.insert(MessageRow.rowid(row)).inserted else { continue }
+            try body(MessageRow(row), sequence)
             sequence += 1
+        }
+    }
 
-            let itemType: Int64 = row[8] ?? 0
-            if Self.systemItemTypes.contains(itemType) { continue }
-            let isRetracted = (row[13] as Int64? ?? 0) != 0
-            let payload: Data? = isRetracted ? nil : row[14]
-            var (text, hadAttachment, flags) =
-                isRetracted
-                ? (Self.unsentMarker, false, MessageRecord.Flags.unsent)
-                : Self.renderText(
-                    attributedBody: row[7],
-                    fallbackText: (row[6] as Data?).map {
-                        String(decoding: $0, as: UTF8.self)
-                    },
-                    balloonBundleID: row[12],
-                    attachments: attachmentMap[rowid] ?? [],
-                    payload: payload, unsentParts: Self.unsentParts(row[18]))
-            if itemType != 0 {
-                guard !text.isEmpty, text != Self.unreadableMarker else {
-                    skipped.append(SkippedMessage(date: knownDate, reason: .unknownType))
-                    continue
-                }
-                text += " " + Self.unknownTypeMarker
-                flags.insert(.unknownType)
-            }
-            if text.isEmpty {
-                skipped.append(SkippedMessage(date: knownDate, reason: .emptyBody))
-                continue
-            }
-            if knownDate == nil {
-                skipped.append(SkippedMessage(date: nil, reason: .invalidDate))
-                continue
-            }
-            let canMark = isFromMe && !flags.contains(.unsent)
-            if canMark, (row[15] as Int64? ?? 0) != 0 {
-                text += " " + Self.notDeliveredMarker
-                flags.insert(.notDelivered)
-            } else if canMark,
-                Self.isPendingScheduled(
-                    scheduleType: row[17], isSent: row[16])
-            {
-                text += " " + Self.scheduledMarker
-                flags.insert(.scheduled)
-            }
-
-            let guid: String? = row[1]
-            if let guid, let payload, let poll = AppMessage.poll(from: payload) {
-                pollOptions[guid] = Dictionary(
+    /// Routes a row to the reactions, the skipped list, or the emitted records.
+    func classify(
+        _ row: MessageRow, sequence: Int, attachments: [Int64: [AttachmentInfo]],
+        into state: inout ExtractionState
+    ) {
+        let kind = Reactions.kind(of: row.associatedType)
+        if kind != .message {
+            routeReaction(row, kind: kind, sequence: sequence, into: &state)
+            return
+        }
+        if Self.systemItemTypes.contains(row.itemType) { return }
+        switch buildRecord(row, attachments: attachments[row.rowid] ?? []) {
+        case .skipped(let skip):
+            state.skipped.append(skip)
+        case .record(let record, let payload):
+            if let guid = record.guid, let payload, let poll = AppMessage.poll(from: payload) {
+                state.pollOptions[guid] = Dictionary(
                     poll.options.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
             }
-            let record = MessageRecord(
-                guid: guid,
-                date: date,
-                speaker: label(isFromMe: isFromMe, handleID: handleID),
-                isTarget: !isFromMe && isOneToOne && !isNoteToSelf,
-                service: row[5],
-                text: text,
-                hadAttachment: hadAttachment,
-                reactions: [],
-                flags: flags,
-                isInvisibleInk: (row[19] as String?) == Self.invisibleInkEffect)
-            if let guid { indexByGUID[guid] = emitted.count }
-            emitted.append(record)
-            incoming.append(!isFromMe)
+            if let guid = record.guid { state.indexByGUID[guid] = state.emitted.count }
+            state.emitted.append(record)
+            state.incoming.append(!row.isFromMe)
         }
+    }
 
-        if isNoteToSelf {
-            let echoes = Self.echoes(in: emitted, incoming: incoming)
-            for (echo, sent) in echoes {
-                if let guid = emitted[echo].guid { indexByGUID[guid] = sent }
-                skipped.append(SkippedMessage(date: emitted[echo].date, reason: .echo))
-            }
-            let kept = emitted.indices.filter { echoes[$0] == nil }
-            let newIndex = Dictionary(uniqueKeysWithValues: kept.enumerated().map { ($1, $0) })
-            indexByGUID = indexByGUID.compactMapValues { newIndex[$0] }
-            emitted = kept.map { emitted[$0] }
+    func routeReaction(
+        _ row: MessageRow, kind: Reactions.Kind, sequence: Int, into state: inout ExtractionState
+    ) {
+        let reactor =
+            row.isFromMe || isNoteToSelf ? "me" : isOneToOne ? "them" : "h\(row.handleID)"
+        let (target, part) = Reactions.target(from: row.associatedGUID ?? "")
+        let key: String
+        let emoji: String
+        var isRemove = false
+        switch kind {
+        case .tapback(let base, let remove):
+            key = (base == 2007 ? "sticker-tapback:" : "tapback:") + reactor
+            emoji = Reactions.emoji(base: base, custom: row.associatedEmoji)
+            isRemove = remove
+        case .sticker:
+            key = "sticker:\(row.rowid)"
+            emoji = "sticker"
+        case .vote:
+            let options = state.pollOptions[target] ?? [:]
+            let chosen = row.payload.map(AppMessage.votes(from:)) ?? []
+            let texts = chosen.compactMap { options[$0] }
+            key = "vote:" + reactor
+            emoji = texts.isEmpty ? "voted" : "voted " + texts.joined(separator: ", ")
+        case .message, .unknown:
+            Self.log.notice("skipped a row with associated_message_type \(row.associatedType)")
+            state.skipped.append(SkippedMessage(date: row.knownDate, reason: .unknownReaction))
+            return
         }
+        state.rawReactions.append(
+            RawReaction(
+                dateNS: row.dateNS,
+                sequence: sequence,
+                targetGUID: target,
+                part: part,
+                reactorKey: key,
+                reactorLabel: label(isFromMe: row.isFromMe, handleID: row.handleID),
+                emoji: emoji,
+                isRemove: isRemove))
+    }
 
-        for (targetGUID, reaction) in Reactions.net(rawReactions) {
-            if let i = indexByGUID[targetGUID] {
-                emitted[i].reactions.append(reaction)
+    enum Built {
+        /// The record, and the app payload a poll's options are read from.
+        case record(MessageRecord, payload: Data?)
+        case skipped(SkippedMessage)
+    }
+
+    /// The body, markers, and flags for one message row, or why it is not shown.
+    func buildRecord(_ row: MessageRow, attachments: [AttachmentInfo]) -> Built {
+        let payload = row.isRetracted ? nil : row.payload
+        var (text, hadAttachment, flags) =
+            row.isRetracted
+            ? (Self.unsentMarker, false, MessageRecord.Flags.unsent)
+            : Self.renderText(
+                attributedBody: row.attributedBody,
+                fallbackText: row.text.map { String(decoding: $0, as: UTF8.self) },
+                balloonBundleID: row.balloonBundleID,
+                attachments: attachments,
+                payload: payload, unsentParts: Self.unsentParts(row.summaryInfo))
+        if row.itemType != 0 {
+            guard !text.isEmpty, text != Self.unreadableMarker else {
+                return .skipped(SkippedMessage(date: row.knownDate, reason: .unknownType))
+            }
+            text += " " + Self.unknownTypeMarker
+            flags.insert(.unknownType)
+        }
+        if text.isEmpty {
+            return .skipped(SkippedMessage(date: row.knownDate, reason: .emptyBody))
+        }
+        guard let date = row.knownDate else {
+            return .skipped(SkippedMessage(date: nil, reason: .invalidDate))
+        }
+        let canMark = row.isFromMe && !flags.contains(.unsent)
+        if canMark, row.hasError {
+            text += " " + Self.notDeliveredMarker
+            flags.insert(.notDelivered)
+        } else if canMark,
+            Self.isPendingScheduled(scheduleType: row.scheduleType, isSent: row.isSent)
+        {
+            text += " " + Self.scheduledMarker
+            flags.insert(.scheduled)
+        }
+        let record = MessageRecord(
+            guid: row.guid,
+            date: date,
+            speaker: label(isFromMe: row.isFromMe, handleID: row.handleID),
+            isTarget: !row.isFromMe && isOneToOne && !isNoteToSelf,
+            service: row.service,
+            text: text,
+            hadAttachment: hadAttachment,
+            reactions: [],
+            flags: flags,
+            isInvisibleInk: row.effect == Self.invisibleInkEffect)
+        return .record(record, payload: payload)
+    }
+
+    /// Drops the incoming echo of each sent note and points its reactions at the sent row.
+    func applyNoteToSelf(_ state: inout ExtractionState) {
+        let echoes = Self.echoes(in: state.emitted, incoming: state.incoming)
+        for (echo, sent) in echoes {
+            if let guid = state.emitted[echo].guid { state.indexByGUID[guid] = sent }
+            state.skipped.append(SkippedMessage(date: state.emitted[echo].date, reason: .echo))
+        }
+        let kept = state.emitted.indices.filter { echoes[$0] == nil }
+        let newIndex = Dictionary(uniqueKeysWithValues: kept.enumerated().map { ($1, $0) })
+        state.indexByGUID = state.indexByGUID.compactMapValues { newIndex[$0] }
+        state.emitted = kept.map { state.emitted[$0] }
+    }
+
+    /// Nets the reactions and attaches each to its target, in display order.
+    func attachReactions(_ state: inout ExtractionState) {
+        for (targetGUID, reaction) in Reactions.net(state.rawReactions) {
+            if let i = state.indexByGUID[targetGUID] {
+                state.emitted[i].reactions.append(reaction)
             }
         }
-        for i in emitted.indices {
-            emitted[i].reactions.sort {
+        for i in state.emitted.indices {
+            state.emitted[i].reactions.sort {
                 (Reactions.displayRank($0.by), $0.by, $0.emoji)
                     < (Reactions.displayRank($1.by), $1.by, $1.emoji)
             }
         }
-        return Extraction(records: emitted, skipped: skipped)
     }
 
     /// In a note to self, each incoming row that repeats a sent row's text within a
@@ -754,11 +752,8 @@ public struct Extractor: Sendable {
 
         // Probe the opt-in-only columns before preparing the SQL: a missing one
         // would throw at prepare time, so degrade to an empty stream instead.
-        guard
-            try ChatDatabase.hasColumns(
-                ["item_type", "group_action_type", "group_title", "other_handle"],
-                inTable: "message", db: db)
-        else {
+        let columns = ChatDatabase.systemEventColumns
+        guard try SchemaSnapshot.load(db, tables: [columns.table]).has(columns) else {
             Self.log.notice("system events: message table lacks the event columns, yielding none")
             return []
         }
@@ -855,5 +850,87 @@ public struct Extractor: Sendable {
             }
         guard let actor, let verb else { return nil }
         return "\(actor) \(verb)"
+    }
+}
+
+/// One `message` row as `Extractor.extract` reads it. `query` and `init` read the
+/// columns by position (a name lookup costs a string compare per column per row),
+/// so keep the SELECT order and the indexes in step.
+struct MessageRow {
+    let rowid: Int64
+    let guid: String?
+    let rawDate: Int64?
+    let isFromMe: Bool
+    let handleID: Int64
+    let service: String?
+    let text: Data?
+    let attributedBody: Data?
+    let itemType: Int64
+    let associatedType: Int64
+    let associatedGUID: String?
+    let associatedEmoji: String?
+    let balloonBundleID: String?
+    let isRetracted: Bool
+    let payload: Data?
+    let hasError: Bool
+    let isSent: Int64?
+    let scheduleType: Int64?
+    let summaryInfo: Data?
+    let effect: String?
+
+    static func query(_ schema: SchemaSnapshot, chatCount: Int) -> String {
+        func m(_ column: String) -> String { schema.column("m", "message", column) }
+        let placeholders = Array(repeating: "?", count: chatCount).joined(separator: ",")
+        return """
+            SELECT m.ROWID rid, m.guid, m.date, m.is_from_me, m.handle_id,
+                   \(m("service")) service, CAST(\(m("text")) AS BLOB) text,
+                   \(m("attributedBody")) attributedBody, \(m("item_type")) item_type,
+                   \(m("associated_message_type")) amt, \(m("associated_message_guid")) amg,
+                   \(m("associated_message_emoji")) ame,
+                   \(m("balloon_bundle_id")) balloon_bundle_id,
+                   \(m("date_retracted")) date_retracted, \(m("payload_data")) payload_data,
+                   \(m("error")) error, \(m("is_sent")) is_sent,
+                   \(m("schedule_type")) schedule_type,
+                   \(m("message_summary_info")) msi,
+                   \(m("expressive_send_style_id")) effect
+            FROM chat_message_join cmj JOIN message m ON m.ROWID = cmj.message_id
+            WHERE cmj.chat_id IN (\(placeholders))
+            ORDER BY \(Extractor.sortableDate), m.ROWID
+            """
+    }
+
+    static func rowid(_ row: Row) -> Int64 { row[0] }
+
+    init(_ row: Row) {
+        rowid = row[0]
+        guid = row[1]
+        rawDate = row[2]
+        isFromMe = (row[3] as Int64? ?? 0) != 0
+        handleID = row[4] ?? 0
+        service = row[5]
+        text = row[6]
+        attributedBody = row[7]
+        itemType = row[8] ?? 0
+        associatedType = row[9] ?? 0
+        associatedGUID = row[10]
+        associatedEmoji = row[11]
+        balloonBundleID = row[12]
+        isRetracted = (row[13] as Int64? ?? 0) != 0
+        payload = row[14]
+        hasError = (row[15] as Int64? ?? 0) != 0
+        isSent = row[16]
+        scheduleType = row[17]
+        summaryInfo = row[18]
+        effect = row[19]
+    }
+
+    var dateNS: Int64 { Extractor.nanoseconds(rawDate) ?? 0 }
+
+    /// The date floored to whole seconds: DateFormatter rounds fractional seconds
+    /// up, while strftime (the Python reference) truncates them. Nil when unknown.
+    var knownDate: Date? {
+        Extractor.appleDate(rawDate).map {
+            Date(timeIntervalSince1970: $0.timeIntervalSince1970.rounded(.down))
+        }
     }
 }

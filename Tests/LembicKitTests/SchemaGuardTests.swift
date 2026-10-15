@@ -53,4 +53,31 @@ struct SchemaGuardTests {
             gaps.contains(SchemaProblem(table: "attachment", column: nil)),
             "the missing optional table is listed for diagnostics")
     }
+
+    @Test func featureColumnSetsAreOptionalColumns() {
+        let optional = Dictionary(
+            ChatDatabase.optionalSchema.map { ($0.table, Set($0.columns)) },
+            uniquingKeysWith: { $0.union($1) })
+        for set in [
+            ChatDatabase.systemEventColumns, ChatDatabase.attachmentLinkColumns,
+            ChatDatabase.personLinkColumns, ChatDatabase.chatLinkColumns,
+        ] {
+            #expect(
+                Set(set.columns).isSubset(of: optional[set.table] ?? []),
+                "\(set.table) feature columns are declared in optionalSchema")
+        }
+    }
+
+    @Test func sharedSnapshotMatchesPerQueryProbe() throws {
+        let db = try Fixtures.openChatDB(populating: SchemaDegradeTests.sonomaSQL)
+        let schema = try db.schemaSnapshot()
+        #expect(
+            try db.conversationSummaries(schema: schema).map(\.chatID)
+                == db.conversationSummaries().map(\.chatID))
+        #expect(
+            try db.groupParticipantMessageCounts(schema: schema)
+                == db.groupParticipantMessageCounts())
+        #expect(try db.personCentricIDs(schema: schema) == db.personCentricIDs())
+        #expect(try db.groupChatLinks(schema: schema) == db.groupChatLinks())
+    }
 }

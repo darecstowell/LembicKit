@@ -23,6 +23,13 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   optional `contacts:` on both `Export` initializers). `--sample --contacts` now
   reads Contacts too (a TCC prompt is possible) and prints resolved names.
 
+### Security
+
+- A Release app build no longer reads contacts from a bundled
+  `DemoData/contacts.vcf` or from `LEMBIC_CONTACTS`, so a stray file cannot
+  replace the user's Contacts. Debug builds and the CLI still honor
+  `LEMBIC_CONTACTS`; only Debug builds read `DemoData`.
+
 ## [0.4.0] - 2026-10-14
 
 ### Security

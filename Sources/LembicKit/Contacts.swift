@@ -42,24 +42,8 @@ public enum ContactsMap {
 
     /// `region` (ISO 3166-1 alpha-2) completes numbers saved without a country code.
     public static func buildContactInfo(region: String = currentRegion()) throws -> ContactInfo {
-        // Test / fixture override: read contacts from a vCard file instead
-        // of the system store, so a fixture gets names + photo avatars
-        // without importing anything into Contacts.app (and without a TCC prompt).
-        // A normal launch sets no such variable, so the store path is unchanged.
-        if let path = ProcessInfo.processInfo.environment["LEMBIC_CONTACTS"],
-            !path.isEmpty
-        {
-            return try buildContactInfo(
-                vcardAt: URL(fileURLWithPath: (path as NSString).expandingTildeInPath),
-                region: region)
-        }
-        // Bundled fallback: if a `DemoData/contacts.vcf` ships with the executable,
-        // read names + avatars from it instead of the system store — no Contacts
-        // prompt, no address-book access. Absent unless a build bundles one.
-        if let demo = Bundle.main.url(
-            forResource: "contacts", withExtension: "vcf", subdirectory: "DemoData")
-        {
-            return try buildContactInfo(vcardAt: demo, region: region)
+        if let file = vcardOverride() {
+            return try buildContactInfo(vcardAt: file, region: region)
         }
 
         guard try requestAccess() else { throw ContactsError.accessDenied }
@@ -86,6 +70,28 @@ public enum ContactsMap {
         }
         return maps.info
     }
+
+    /// A vCard to read instead of the system store. `LEMBIC_CONTACTS` counts in a
+    /// Debug build or outside an app bundle (the CLI); a bundled
+    /// `DemoData/contacts.vcf` counts in a Debug build only.
+    static func vcardOverride(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundle: Bundle = .main, isDebugBuild: Bool = isDebugBuild
+    ) -> URL? {
+        if let path = environment["LEMBIC_CONTACTS"], !path.isEmpty,
+            isDebugBuild || bundle.bundleURL.pathExtension != "app"
+        {
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        }
+        guard isDebugBuild else { return nil }
+        return bundle.url(forResource: "contacts", withExtension: "vcf", subdirectory: "DemoData")
+    }
+
+    #if DEBUG
+        static let isDebugBuild = true
+    #else
+        static let isDebugBuild = false
+    #endif
 
     /// Build the same maps from a vCard file instead of the system store — the
     /// `LEMBIC_CONTACTS` path. vCard-parsed contacts carry full PHOTO data rather
@@ -120,10 +126,10 @@ public enum ContactsMap {
     }
 
     private static func handles(of contact: CNContact, region: String) -> Set<String> {
-        let phones = contact.phoneNumbers.compactMap {
-            normalizePhone($0.value.stringValue, defaultRegion: region)
-        }
-        return Set(phones + contact.emailAddresses.map { ($0.value as String).lowercased() })
+        let normalize = HandleNormalizer(region: region)
+        let phones = contact.phoneNumbers.compactMap { normalize.phone($0.value.stringValue) }
+        return Set(
+            phones + contact.emailAddresses.map { HandleNormalizer.email($0.value as String) })
     }
 
     /// Fold one contact's name + photo into the maps under each of its normalized
@@ -145,13 +151,12 @@ public enum ContactsMap {
             }
             if let photo, maps.avatars[key] == nil { maps.avatars[key] = photo }
         }
+        let normalize = HandleNormalizer(region: region)
         for phone in contact.phoneNumbers {
-            if let normalized = normalizePhone(phone.value.stringValue, defaultRegion: region) {
-                put(normalized)
-            }
+            if let normalized = normalize.phone(phone.value.stringValue) { put(normalized) }
         }
         for email in contact.emailAddresses {
-            put((email.value as String).lowercased())
+            put(HandleNormalizer.email(email.value as String))
         }
     }
 
@@ -214,10 +219,7 @@ public enum ContactsMap {
     public static func normalizeHandle(_ handle: String, defaultRegion: String = defaultRegion)
         -> String
     {
-        if handle.contains("@") { return handle.lowercased() }
-        // A business chat (`urn:biz:…`) or any other non-phone id is not a number.
-        if handle.contains(":") || handle.contains(where: \.isLetter) { return handle }
-        return normalizePhone(handle, defaultRegion: defaultRegion) ?? handle
+        HandleNormalizer(region: defaultRegion)(handle)
     }
 
     /// Best-effort E.164. A `+` prefix is authoritative. An international exit code
@@ -299,7 +301,7 @@ public enum ContactsMap {
         contacts: [String: String],
         region: String = currentRegion()
     ) -> (resolved: [Int64: String], matched: Int) {
-        let normalized = handleLabels.mapValues { normalizeHandle($0, defaultRegion: region) }
+        let normalized = handleLabels.mapValues(HandleNormalizer(region: region).callAsFunction)
         let names = withNationalFallback(
             names: contacts, contactIDs: [:], handles: normalized.values
         ).names
@@ -315,4 +317,23 @@ public enum ContactsMap {
         }
         return (out, matched)
     }
+}
+
+/// Normalizes chat.db and Contacts handles the same way, for one region.
+struct HandleNormalizer: Sendable {
+    let region: String
+
+    /// An email lowercased, a phone in best-effort E.164, any other id unchanged.
+    func callAsFunction(_ handle: String) -> String {
+        if handle.contains("@") { return Self.email(handle) }
+        // A business chat (`urn:biz:…`) or any other non-phone id is not a number.
+        if handle.contains(":") || handle.contains(where: \.isLetter) { return handle }
+        return phone(handle) ?? handle
+    }
+
+    func phone(_ raw: String) -> String? {
+        ContactsMap.normalizePhone(raw, defaultRegion: region)
+    }
+
+    static func email(_ raw: String) -> String { raw.lowercased() }
 }

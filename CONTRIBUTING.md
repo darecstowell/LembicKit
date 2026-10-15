@@ -78,7 +78,7 @@ golden diff in review is the sign that an output change was an accident.
 `ChatDatabase.requiredSchema` lists the core columns the engine cannot work
 without, and `ChatDatabase.optionalSchema` lists every other column the SQL reads.
 If you add a column to a query, add it to one of the two lists. A new column is
-almost always optional: select it through `SchemaColumns.column(_:_:_:)` so an
+almost always optional: select it through `SchemaSnapshot.column(_:_:_:)` so an
 older or newer macOS that lacks it degrades one feature instead of failing. The
 guard fails closed only on core columns: without them, an export would be wrong.
 
