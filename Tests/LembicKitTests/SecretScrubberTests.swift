@@ -66,19 +66,24 @@ struct SecretScrubberTests {
             "no dotted TLD → not matched")
     }
 
-    // A 32 KB `a-` run that never reaches a TLD used to backtrack for seconds on
-    // the render thread. The hardened pattern must finish well under 50 ms.
+    // A 32 KB `a-` run that never reaches a TLD used to backtrack for about 12 s.
+    // Bounds are loose so a busy machine passes; backtracking is quadratic and fails both.
     @Test("email scrub is not ReDoS-vulnerable on a pathological hyphen run")
     func emailReDoSGuard() {
-        let payload = "x@" + String(repeating: "a-", count: 16 * 1024)
-        let rec = detRec("g", payload)
-        let clock = ContinuousClock()
-        let elapsed = clock.measure {
-            _ = SecretScrubber.scrub(in: [rec], categories: [.email])
+        func fastest(_ pairs: Int) -> Duration {
+            let rec = detRec("g", "x@" + String(repeating: "a-", count: pairs))
+            return (0..<3).map { _ in
+                ContinuousClock().measure {
+                    _ = SecretScrubber.scrub(in: [rec], categories: [.email])
+                }
+            }.min()!
         }
+        let small = fastest(2 * 1024)
+        let large = fastest(16 * 1024)
+        #expect(large < .seconds(2), "a 32 KB a- payload took \(large)")
         #expect(
-            elapsed < .milliseconds(50),
-            "a 32 KB a- payload must scrub in < 50 ms; took \(elapsed)")
+            large < small * 24 + .milliseconds(100),
+            "8x the input took \(large) against \(small); growth must be near linear")
         // The hardened pattern still scrubs an ordinary address.
         #expect(scrubbedSlices("ping jane@example.com please", [.email]) == ["jane@example.com"])
     }
