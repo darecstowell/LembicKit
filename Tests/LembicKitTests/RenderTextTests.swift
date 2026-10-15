@@ -8,9 +8,10 @@ struct RenderTextTests {
     private func render(
         _ raw: String?, _ attachments: [AttachmentInfo] = [], balloon: String? = nil
     ) -> (String, Bool) {
-        Extractor.renderText(
+        let out = Extractor.renderText(
             attributedBody: nil, fallbackText: raw, balloonBundleID: balloon,
             attachments: attachments)
+        return (out.text, out.hadAttachment)
     }
 
     @Test func renderText() {

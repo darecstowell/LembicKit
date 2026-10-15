@@ -247,7 +247,7 @@ struct RedactionRenderTests {
         // The roster header lists the group name + EVERY member (incl. the silent
         // one), and never falls back to the 1:1 "Them = <number>" legend.
         #expect(
-            rendered.contains("# iMessage group transcript: \"Trip crew\""),
+            rendered.contains("# Messages group transcript: \"Trip crew\""),
             "the group header carries the group name")
         #expect(
             rendered.contains("# Participants: Me = the account owner · Alice · Bob"),
@@ -344,7 +344,7 @@ struct RedactionRenderTests {
         ).text
         #expect(!anon.contains("Trip crew"), "the group name is scrubbed when anonymizing")
         #expect(
-            !anon.contains("# iMessage group transcript") && !anon.contains("# Participants:"),
+            !anon.contains("# Messages group transcript") && !anon.contains("# Participants:"),
             "neither the group title nor the roster header is emitted when anonymizing")
         // Speaker LABELS are anonymized (the body text "hi from Alice" is untouched,
         // as anonymization relabels speakers, not message contents).

@@ -15,13 +15,8 @@ import Foundation
 ///       immediately after it, so every output index past it shifts by +8.
 /// Both are folded into the breakpoint table, so `outStart` is the TRUE
 /// output-body position and no caller needs to re-count newlines.
-/// (Attachment-trim is intentionally NOT modelled — see the trim ruling in
-/// `compactText`; trim+redaction overlap is best-effort for now. Concretely:
-/// detected-secret highlight (and redaction) offsets are computed against the
-/// UNTRIMMED message text, so under `dropAttachmentPlaceholders` a highlight or
-/// redaction can be mis-positioned when an attachment placeholder is stripped
-/// from the same message ahead of the secret. A deferred fast-follow will unify
-/// the trim coordinate space.)
+/// The attachment-placeholder trim is one more replacement in the same table, so
+/// trim, redaction, and highlight offsets all stay in source coordinates.
 ///
 /// Extracted from the transcript renderer (the offset-map extraction) so the
 /// redaction-coordinate math has its own isolated test surface (`RedactionMapTests`).
@@ -45,6 +40,17 @@ struct OffsetMap: Sendable {
     ) {
         self.sourceLength = sourceLength
         self.redactedSourceRanges = replacements.map(\.range)
+        // An unchanged one-line body maps 1:1; skip the per-character scan.
+        if replacements.isEmpty, source.range(of: "\n").location == NSNotFound {
+            let end = Seg(
+                srcStart: sourceLength, srcEnd: sourceLength, outStart: sourceLength,
+                isRedacted: false)
+            segs =
+                sourceLength > 0
+                ? [Seg(srcStart: 0, srcEnd: sourceLength, outStart: 0, isRedacted: false), end]
+                : [end]
+            return
+        }
         var segs: [Seg] = []
         var srcCursor = 0
         var outCursor = 0

@@ -117,12 +117,17 @@ extension Export {
         /// "flag for review" toggle. **Default = all cases** (detectors on), so
         /// the rendered output / highlight marks are byte-identical to today.
         public var enabledDetectors: Set<SecretCategory>
+        /// Names a speaker label stands for, keyed by label (for example
+        /// `["Them": ["Sarah Chen"], "Me": ["Darec Stowell"], "Mike R.": ["Mike Rogers"]]`).
+        /// Under `anonymizeSpeakers`, each name and each part of it reads as that speaker's alias.
+        public var knownNames: [String: [String]]
 
         public init(
             dateRange: ClosedRange<Date>? = nil, trim: Transcript.TrimOptions = .none,
             anonymizeSpeakers: Bool = false, showSystemEvents: Bool = false,
             enabledScrubbers: Set<ScrubberCategory> = [],
-            enabledDetectors: Set<SecretCategory> = Set(SecretCategory.allCases)
+            enabledDetectors: Set<SecretCategory> = Set(SecretCategory.allCases),
+            knownNames: [String: [String]] = [:]
         ) {
             self.dateRange = dateRange
             self.trim = trim
@@ -130,6 +135,7 @@ extension Export {
             self.showSystemEvents = showSystemEvents
             self.enabledScrubbers = enabledScrubbers
             self.enabledDetectors = enabledDetectors
+            self.knownNames = knownNames
         }
 
         /// Full history, no trim.
@@ -148,13 +154,20 @@ extension Export {
     ///   already treats as "empty scope," not "error.")
     /// - `records` is the in-range record set, so a caller can size a meter /
     ///   reconcile counts without re-extracting.
+    /// - `skipped` is the in-range rows the extractor read but could not show.
     public struct Rendered: Sendable {
         public let txt: String?
         public let jsonl: String?
         public let result: Transcript.RenderResult?
         public let detected: [DetectedSecret]
-        public let records: [MessageRecord]
+        /// The rendered records with message text NOT redacted. For counts and names only;
+        /// output text must come from `txt`, `jsonl`, or `preparedRedactedRecords`.
+        public let unredactedRecords: [MessageRecord]
         public let messageCount: Int
+        public let skipped: [SkippedMessage]
+
+        @available(*, deprecated, renamed: "unredactedRecords")
+        public var records: [MessageRecord] { unredactedRecords }
 
         public init(
             txt: String?,
@@ -162,14 +175,16 @@ extension Export {
             result: Transcript.RenderResult?,
             detected: [DetectedSecret],
             records: [MessageRecord],
-            messageCount: Int
+            messageCount: Int,
+            skipped: [SkippedMessage] = []
         ) {
             self.txt = txt
             self.jsonl = jsonl
             self.result = result
             self.detected = detected
-            self.records = records
+            self.unredactedRecords = records
             self.messageCount = messageCount
+            self.skipped = skipped
         }
     }
 
@@ -212,8 +227,8 @@ extension Export {
     ) throws -> Rendered {
         let labels = try resolvedLabels(resolveContacts: resolveContacts)
         let extractor = Extractor.forConversation(conversation, globalLabels: labels)
-        let records = try database.read { db in
-            try extractor.extractConversation(db, chatIDs: conversation.chatIDs)
+        let extraction = try database.read { db in
+            try extractor.extract(db, chatIDs: conversation.chatIDs)
         }
         // System events are opt-in (off by default) and group-only; extract them
         // only when both hold, so the default path never reads the extra columns.
@@ -225,10 +240,40 @@ extension Export {
         } else {
             systemEvents = []
         }
+        var named = scope
+        named.knownNames = Export.knownNames(
+            for: conversation, labels: labels, adding: scope.knownNames)
         return Export.render(
-            records: records, number: conversation.primaryIdentifier,
-            formats: formats, scope: scope, redactions: redactions, detect: detect,
-            group: Export.groupRenderInfo(for: conversation), systemEvents: systemEvents)
+            records: extraction.records, number: conversation.primaryIdentifier,
+            formats: formats, scope: named, redactions: redactions, detect: detect,
+            group: Export.groupRenderInfo(for: conversation), systemEvents: systemEvents,
+            skipped: extraction.skipped, noteToSelf: conversation.isNoteToSelf)
+    }
+
+    /// The names each speaker label stands for in `conversation`: the contact name
+    /// for "Them" in a 1:1, and each group member's full contact name keyed by roster
+    /// label. `labels` is the resolved handle-to-name map. `extra` is added on top.
+    public static func knownNames(
+        for conversation: Conversation, labels: [Int64: String],
+        adding extra: [String: [String]] = [:]
+    ) -> [String: [String]] {
+        var names = extra
+        func add(_ label: String, _ name: String?) {
+            guard let name, name.contains(where: \.isLetter), !name.contains("@") else { return }
+            if !(names[label] ?? []).contains(name) { names[label, default: []].append(name) }
+        }
+        if conversation.isGroup {
+            for p in conversation.participants {
+                let label = p.label ?? labels[p.handleID] ?? p.identifier
+                guard NameMatcher.isAliasableName(label) else { continue }
+                if names[label] == nil { names[label] = [] }
+                add(label, labels[p.handleID])
+            }
+        } else {
+            add("Them", conversation.displayName)
+            for handle in conversation.targetHandles { add("Them", labels[handle]) }
+        }
+        return names
     }
 
     /// The `Transcript.GroupRenderInfo` for a group conversation (the roster
@@ -243,13 +288,16 @@ extension Export {
         for conversation: Conversation
     ) -> Transcript.GroupRenderInfo? {
         guard conversation.isGroup else { return nil }
-        let labels = conversation.participants.map { $0.label ?? $0.identifier }
+        let current = conversation.participants.filter { !$0.isFormer }
+        let labels = current.map { $0.label ?? $0.identifier }
+        let former = conversation.participants.filter(\.isFormer).map { $0.label ?? $0.identifier }
         // A degenerate group with an empty roster has no labels to join, so fall
         // back to the conversation's (already non-empty) displayName so the
-        // `# iMessage group transcript:` header is never blank.
+        // `# Messages group transcript:` header is never blank.
         let joined = labels.joined(separator: ", ")
         let name = conversation.groupName ?? (joined.isEmpty ? conversation.displayName : joined)
-        return Transcript.GroupRenderInfo(name: name, participantLabels: labels)
+        return Transcript.GroupRenderInfo(
+            name: name, participantLabels: labels, formerLabels: former)
     }
 
     /// The scope-filtered record set — the exact slice `render` feeds the
@@ -264,8 +312,15 @@ extension Export {
     ///   `Transcript.compactText`/`jsonLines`. A downstream formatter that bypasses
     ///   those engine renderers must call `preparedRecords(_:scope:)` instead, or
     ///   it silently ignores those toggles (the alternate-format deviation this fixes).
-    public static func records(_ records: [MessageRecord], scope: Scope) -> [MessageRecord] {
+    public static func unredactedRecords(_ records: [MessageRecord], scope: Scope)
+        -> [MessageRecord]
+    {
         scope.dateRange.map { range in records.filter { range.contains($0.date) } } ?? records
+    }
+
+    @available(*, deprecated, renamed: "unredactedRecords(_:scope:)")
+    public static func records(_ records: [MessageRecord], scope: Scope) -> [MessageRecord] {
+        unredactedRecords(records, scope: scope)
     }
 
     /// The **fully-prepared** record set for a scope — the date-filtered slice with
@@ -289,19 +344,29 @@ extension Export {
     ///    through `Transcript.anonymizationMap` (built from the date-filtered set, so
     ///    the `PN` numbering matches the `.txt`/`.jsonl` map exactly).
     ///
-    /// Redaction is NOT applied here — that stays per-message at render time via
-    /// `Transcript.redactedText(of:redactions:)`, mirroring `compactText` (which
-    /// splices `[redacted]` over the trimmed body). A renderer feeds these prepared
-    /// records to `redactedText`, so trim + anonymize + redaction all compose, and
-    /// whole-message-redacted rows are still omitted by the renderer.
+    /// Redaction is NOT applied here. Redaction offsets point into the SOURCE text,
+    /// so they do not fit a trimmed body: an output that needs redaction must use
+    /// `preparedRedactedRecords`, never `redactedText` on these records.
+    @available(*, deprecated, renamed: "unredactedPreparedRecords(_:scope:)")
     public static func preparedRecords(
         _ records: [MessageRecord], scope: Scope
     ) -> [MessageRecord] {
-        let filtered = Self.records(records, scope: scope)
+        unredactedPreparedRecords(records, scope: scope)
+    }
+
+    /// `preparedRecords` under a name that says the text is not redacted. Anonymize
+    /// hides only `scope.knownNames`; pass `Export.knownNames(for:labels:)` for them.
+    public static func unredactedPreparedRecords(
+        _ records: [MessageRecord], scope: Scope
+    ) -> [MessageRecord] {
+        var scope = scope
+        let filtered = Self.identityScrubbed(
+            Self.unredactedRecords(records, scope: scope), scope: &scope)
         // The PN alias map is built from the date-filtered set — the same input
         // `compactText`/`jsonLines` see — so the speaker numbering is identical.
         let aliases =
-            scope.anonymizeSpeakers ? Transcript.anonymizationMap(for: filtered) : [:]
+            scope.anonymizeSpeakers
+            ? Transcript.anonymizationMap(for: filtered, knownNames: scope.knownNames) : [:]
 
         var out: [MessageRecord] = []
         out.reserveCapacity(filtered.count)
@@ -314,30 +379,44 @@ extension Export {
                 if text.isEmpty { continue }
             }
 
-            var reactions = scope.trim.dropReactions ? [] : record.reactions
-            var speaker = record.speaker
-            if scope.anonymizeSpeakers {
-                speaker = aliases[record.speaker] ?? record.speaker
-                reactions = reactions.map {
-                    Reaction(by: aliases[$0.by] ?? $0.by, emoji: $0.emoji)
-                }
-            }
-
-            // Only rebuild when something changed (the no-trim/no-anonymize default
-            // returns the record untouched, preserving its guid/date/flags).
-            if text == record.text, speaker == record.speaker,
-                reactions == record.reactions
-            {
-                out.append(record)
-            } else {
-                out.append(
-                    MessageRecord(
-                        guid: record.guid, date: record.date, speaker: speaker,
-                        isTarget: record.isTarget, service: record.service, text: text,
-                        hadAttachment: record.hadAttachment, reactions: reactions))
-            }
+            out.append(prepared(record, text: text, scope: scope, aliases: aliases))
         }
         return out
+    }
+
+    /// `record` with `text`, the reaction trim, and the speaker aliases applied.
+    private static func prepared(
+        _ record: MessageRecord, text: String, scope: Scope, aliases: [String: String]
+    ) -> MessageRecord {
+        var reactions = scope.trim.dropReactions ? [] : record.reactions
+        var speaker = record.speaker
+        if scope.anonymizeSpeakers {
+            speaker = aliases[record.speaker] ?? record.speaker
+            reactions = reactions.map {
+                Reaction(by: aliases[$0.by] ?? $0.by, emoji: $0.emoji)
+            }
+        }
+
+        // Only rebuild when something changed (the no-trim/no-anonymize default
+        // returns the record untouched, preserving its guid/date/flags).
+        if text == record.text, speaker == record.speaker, reactions == record.reactions {
+            return record
+        }
+        return MessageRecord(
+            guid: record.guid, date: record.date, speaker: speaker,
+            isTarget: record.isTarget, service: record.service, text: text,
+            hadAttachment: record.hadAttachment, reactions: reactions,
+            flags: record.flags, isInvisibleInk: record.isInvisibleInk)
+    }
+
+    /// `records` with identifier speaker labels and reaction authors made neutral
+    /// when a scrubber is on (the same labels `render` shows).
+    static func identityScrubbed(_ records: [MessageRecord], scope: inout Scope) -> [MessageRecord]
+    {
+        let identity = IdentityScrub(
+            categories: scope.enabledScrubbers, detectors: scope.enabledDetectors, records: records)
+        scope.knownNames = identity.knownNames(scope.knownNames)
+        return identity.records(records)
     }
 
     /// The **effective** redaction set for a render: the caller's manual
@@ -349,18 +428,18 @@ extension Export {
     /// format in cleartext while another shows `[redacted]`.
     ///
     /// `records` MUST be the already-date-filtered slice (the same set the renderer
-    /// sees), so the scrubber scans exactly what is rendered. With
-    /// `scope.enabledScrubbers` empty (the default) this returns `manual` unchanged,
-    /// so today's bytes are reproduced.
+    /// sees), so the scrubber scans exactly what is rendered. A reaction message that
+    /// quotes a redacted message (`Loved “…”`) gets the same redactions on the quote.
     public static func effectiveRedactions(
         manual: RedactionSet, records: [MessageRecord], scope: Scope
     ) -> RedactionSet {
-        guard !scope.enabledScrubbers.isEmpty else { return manual }
         var effective = manual
-        for r in SecretScrubber.scrub(in: records, categories: scope.enabledScrubbers).all {
-            effective.add(r)
+        if !scope.enabledScrubbers.isEmpty {
+            for r in SecretScrubber.scrub(in: records, categories: scope.enabledScrubbers).all {
+                effective.add(r)
+            }
         }
-        return effective
+        return QuoteReactions.carryRedactions(effective, records: records)
     }
 
     /// The fully-prepared, fully-redacted record set for downstream formatters
@@ -385,48 +464,43 @@ extension Export {
     /// The returned records carry the FINAL body: a caller hands them to a
     /// formatter with an **empty** `RedactionSet()` (the redaction is already baked).
     ///
-    /// - Important: redactions are applied against each record's **untrimmed**
-    ///   `text` offsets, matching `compactText`. Under the non-default
-    ///   `dropAttachmentPlaceholders`, placeholder stripping happens in step 1
-    ///   while redaction offsets anchor to the original text — the same documented
-    ///   trim/redaction edge `compactText` carries (not made worse here).
+    /// - Important: the placeholder strip, the redactions, and the aliases all use
+    ///   the record's source `text` offsets, exactly as `compactText` does.
+    /// - Important: anonymize hides only the names in `scope.knownNames`. Pass
+    ///   `Export.knownNames(for:labels:)` for the conversation, as `render(_:)` does.
     public static func preparedRedactedRecords(
         _ records: [MessageRecord], scope: Scope, redactions: RedactionSet
     ) -> [MessageRecord] {
         // The same date-filtered slice the renderer scans, so the scrubber fold and
         // the body render see exactly what is exported.
-        let filtered = Self.records(records, scope: scope)
+        var scope = scope
+        let filtered = Self.identityScrubbed(
+            Self.unredactedRecords(records, scope: scope), scope: &scope)
         let effective = Self.effectiveRedactions(
             manual: redactions, records: filtered, scope: scope)
         // The speaker→PN map, built from the date-filtered set so the in-body alias
         // numbering matches `compactText`/`jsonLines` exactly. Empty when not
         // anonymizing (so `renderedBody` aliases nothing).
         let aliases =
-            scope.anonymizeSpeakers ? Transcript.anonymizationMap(for: filtered) : [:]
-
-        // trim + speaker-alias prepared records (date filter already applied above,
-        // re-applied identically inside — `preparedRecords` is idempotent on a
-        // date-filtered set since `records(_:scope:)` is a no-op when in range).
-        let prepared = Self.preparedRecords(filtered, scope: scope)
+            scope.anonymizeSpeakers
+            ? Transcript.anonymizationMap(for: filtered, knownNames: scope.knownNames) : [:]
+        let names =
+            scope.anonymizeSpeakers
+            ? NameMatcher(aliases: aliases, knownNames: scope.knownNames) : nil
 
         var out: [MessageRecord] = []
-        out.reserveCapacity(prepared.count)
-        for record in prepared {
-            // Bake the unified body: effective redactions + in-body name aliases.
+        out.reserveCapacity(filtered.count)
+        for record in filtered {
+            // Trim, redactions, and in-body aliases all splice the SOURCE text in one
+            // pass, so a stripped placeholder can never shift a redaction span.
             // nil ⇒ whole-message redacted ⇒ drop the row.
+            let strip = scope.trim.dropAttachmentPlaceholders && record.hadAttachment
+            if strip, Transcript.stripPlaceholders(record.text).isEmpty { continue }
             guard
                 let body = Transcript.renderedBody(
-                    of: record, redactions: effective, aliases: aliases)
+                    of: record, redactions: effective, names: names, stripPlaceholders: strip)
             else { continue }
-            if body == record.text {
-                out.append(record)
-            } else {
-                out.append(
-                    MessageRecord(
-                        guid: record.guid, date: record.date, speaker: record.speaker,
-                        isTarget: record.isTarget, service: record.service, text: body,
-                        hadAttachment: record.hadAttachment, reactions: record.reactions))
-            }
+            out.append(prepared(record, text: body, scope: scope, aliases: aliases))
         }
         return out
     }
@@ -446,11 +520,17 @@ extension Export {
         redactions: RedactionSet = RedactionSet(),
         detect: Bool = true,
         group: Transcript.GroupRenderInfo? = nil,
-        systemEvents: [Transcript.SystemEvent] = []
+        systemEvents: [Transcript.SystemEvent] = [],
+        skipped: [SkippedMessage] = [],
+        noteToSelf: Bool = false
     ) -> Rendered {
         // (1) Filter to the scope's date window (nil = full history) — the single
         // filtering path, shared with the public `records(_:scope:)` accessor.
-        let filtered = Self.records(records, scope: scope)
+        let filtered = Self.unredactedRecords(records, scope: scope)
+        let scopedSkips =
+            scope.dateRange.map { range in
+                skipped.filter { $0.date.map(range.contains) ?? false }
+            } ?? skipped
 
         // Empty scope → empty strings + nil result (the caller's existing
         // "nil RenderResult is the empty render" contract).
@@ -458,7 +538,7 @@ extension Export {
             return Rendered(
                 txt: formats.contains(.txt) ? "" : nil,
                 jsonl: formats.contains(.jsonl) ? "" : nil,
-                result: nil, detected: [], records: [], messageCount: 0)
+                result: nil, detected: [], records: [], messageCount: 0, skipped: scopedSkips)
         }
 
         // (2) Detect over the FILTERED set — cheap, pure, idempotent. Honor the
@@ -488,25 +568,33 @@ extension Export {
                 ?? systemEvents
             : []
 
+        // Enabled scrubbers also reach the header, roster, labels, and events.
+        let identity = IdentityScrub(
+            categories: scope.enabledScrubbers, detectors: scope.enabledDetectors,
+            records: filtered, group: group)
+        let shown = identity.records(filtered)
+        let knownNames = identity.knownNames(scope.knownNames)
+
         var txt: String?
         var result: Transcript.RenderResult?
         if formats.contains(.txt) {
             let rendered = Transcript.compactText(
-                records: filtered, number: number, trim: scope.trim,
+                records: shown, number: identity.identifier(number), trim: scope.trim,
                 redactions: effectiveRedactions, detected: detected,
-                anonymize: scope.anonymizeSpeakers, group: group,
-                systemEvents: scopedEvents)
+                anonymize: scope.anonymizeSpeakers, group: identity.group(group),
+                systemEvents: identity.events(scopedEvents), knownNames: knownNames,
+                noteToSelf: noteToSelf)
             txt = rendered.text
             result = rendered
         }
         let jsonl =
             formats.contains(.jsonl)
             ? Transcript.jsonLines(
-                records: filtered, redactions: effectiveRedactions,
-                anonymize: scope.anonymizeSpeakers) : nil
+                records: shown, redactions: effectiveRedactions,
+                anonymize: scope.anonymizeSpeakers, knownNames: knownNames) : nil
 
         return Rendered(
             txt: txt, jsonl: jsonl, result: result, detected: detected,
-            records: filtered, messageCount: filtered.count)
+            records: shown, messageCount: shown.count, skipped: scopedSkips)
     }
 }

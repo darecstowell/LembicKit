@@ -5,7 +5,7 @@ import Testing
 
 // The public engine APIs that downstream formatters build on:
 // `Transcript.redactedText(of:redactions:)` (the redaction-aware render behind one
-// auditable surface) and `Export.records(_:scope:)` (the scoped record accessor that
+// auditable surface) and `Export.unredactedRecords(_:scope:)` (the scoped record accessor that
 // `render` shares its single filtering path with).
 @Suite("export APIs")
 struct ExportAPITests {
@@ -85,7 +85,7 @@ struct ExportAPITests {
         }
     }
 
-    // MARK: - Export.records(_:scope:)
+    // MARK: - Export.unredactedRecords(_:scope:)
 
     private let recs = [
         Fixtures.exportRec(0, "Them", "day zero"),
@@ -94,30 +94,30 @@ struct ExportAPITests {
     ]
 
     @Test func recordsFullHistoryWhenNoDateRange() {
-        let all = Export.records(recs, scope: .all)
+        let all = Export.unredactedRecords(recs, scope: .all)
         #expect(all.map(\.guid) == ["g0", "g1", "g2"], "nil dateRange → the full set unchanged")
     }
 
     @Test func recordsRespectsDateRangeScope() {
         // A window covering only the middle day (exportRec spaces records 86_400s).
         let mid = t0.addingTimeInterval(86_400)
-        let scoped = Export.records(recs, scope: .init(dateRange: mid...mid))
+        let scoped = Export.unredactedRecords(recs, scope: .init(dateRange: mid...mid))
         #expect(scoped.map(\.guid) == ["g1"], "date range filters to exactly the in-range record")
     }
 
     @Test func recordsMatchesRenderInternalFilter() {
         // The single-filtering-path invariant: the public accessor returns the
-        // SAME set `render` exposes via `Rendered.records`.
+        // SAME set `render` exposes via `Rendered.unredactedRecords`.
         let mid = t0.addingTimeInterval(86_400)
         let scope = Export.Scope(dateRange: mid...mid)
-        let accessor = Export.records(recs, scope: scope)
+        let accessor = Export.unredactedRecords(recs, scope: scope)
         let rendered = Export.render(records: recs, number: "+1", formats: [.txt], scope: scope)
         #expect(
-            accessor.map(\.guid) == rendered.records.map(\.guid),
+            accessor.map(\.guid) == rendered.unredactedRecords.map(\.guid),
             "records(_:scope:) and render share one filtering path")
     }
 
-    // MARK: - Export.preparedRecords(_:scope:)
+    // MARK: - Export.unredactedPreparedRecords(_:scope:)
     //
     // The fully-prepared set downstream formatters consume so they
     // honor `anonymizeSpeakers` + `trim` via the engine's OWN logic — the
@@ -130,7 +130,7 @@ struct ExportAPITests {
             Fixtures.attachRec("g0", 0, "Them", "hi", reacts: [Reaction(by: "Me", emoji: "❤️")]),
             Fixtures.attachRec("g1", 1, "Me", "yo"),
         ]
-        let prepared = Export.preparedRecords(withReacts, scope: .all)
+        let prepared = Export.unredactedPreparedRecords(withReacts, scope: .all)
         #expect(prepared.map(\.guid) == ["g0", "g1"], "no records dropped under the default scope")
         #expect(prepared.map(\.speaker) == ["Them", "Me"], "speakers unchanged")
         #expect(prepared[0].reactions == [Reaction(by: "Me", emoji: "❤️")], "reactions unchanged")
@@ -143,7 +143,7 @@ struct ExportAPITests {
             Fixtures.attachRec("g0", 0, "Me", "first"),
             Fixtures.attachRec("g1", 1, "Them", "second", reacts: [Reaction(by: "Me", emoji: "👍")]),
         ]
-        let prepared = Export.preparedRecords(recs, scope: .init(anonymizeSpeakers: true))
+        let prepared = Export.unredactedPreparedRecords(recs, scope: .init(anonymizeSpeakers: true))
         #expect(prepared.map(\.speaker) == ["P1", "P2"], "owner=P1, counterparty=P2 by first appearance")
         #expect(
             prepared[1].reactions == [Reaction(by: "P1", emoji: "👍")],
@@ -154,7 +154,7 @@ struct ExportAPITests {
         let recs = [
             Fixtures.attachRec("g0", 0, "Them", "hi", reacts: [Reaction(by: "Me", emoji: "❤️")])
         ]
-        let prepared = Export.preparedRecords(recs, scope: .init(trim: .init(dropReactions: true)))
+        let prepared = Export.unredactedPreparedRecords(recs, scope: .init(trim: .init(dropReactions: true)))
         #expect(prepared[0].reactions.isEmpty, "dropReactions clears the reaction list")
     }
 
@@ -166,7 +166,7 @@ struct ExportAPITests {
             Fixtures.attachRec("g1", 1, "Me", "[photo]", attach: true),
             Fixtures.attachRec("g2", 2, "Them", "ok"),
         ]
-        let prepared = Export.preparedRecords(
+        let prepared = Export.unredactedPreparedRecords(
             recs, scope: .init(trim: .init(dropAttachmentPlaceholders: true)))
         #expect(prepared.map(\.guid) == ["g0", "g2"], "attachment-only message dropped")
         #expect(prepared[0].text == "hey", "the caption survives with the placeholder stripped")
@@ -185,7 +185,7 @@ struct ExportAPITests {
             Fixtures.attachRec("g2", 2, "Bob", "yo"),
             Fixtures.attachRec("g3", 3, "(844) 555-0100", "here too"),
         ]
-        let prepared = Export.preparedRecords(recs, scope: .init(anonymizeSpeakers: true))
+        let prepared = Export.unredactedPreparedRecords(recs, scope: .init(anonymizeSpeakers: true))
         #expect(
             prepared.map(\.speaker) == ["P1", "P2", "P3", "P4"],
             "owner=P1, then each further group speaker numbers by first appearance")
@@ -202,7 +202,7 @@ struct ExportAPITests {
             Fixtures.exportRec(1, "Me", "day one"),
         ]
         let mid = t0.addingTimeInterval(86_400)  // only day-one
-        let prepared = Export.preparedRecords(
+        let prepared = Export.unredactedPreparedRecords(
             recs, scope: .init(dateRange: mid...mid, anonymizeSpeakers: true))
         #expect(prepared.map(\.guid) == ["g1"], "date filter applied first")
         #expect(prepared[0].speaker == "P1", "the sole in-window speaker (the owner) anchors to P1")

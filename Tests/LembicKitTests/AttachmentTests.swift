@@ -25,4 +25,29 @@ struct AttachmentTests {
             placeholder("image/png", nil, "x.pluginPayloadAttachment") == nil,
             "rich-link preview dropped")
     }
+
+    @Test func stickersGenmojiLocationsAndM4A() {
+        #expect(
+            AttachmentInfo(
+                mimeType: "image/heic", uti: "public.heic", transferName: nil, isSticker: true
+            )
+            .placeholder == "[sticker]")
+        #expect(
+            AttachmentInfo(
+                mimeType: "image/heic", uti: "public.heic", transferName: nil,
+                emojiDescription: "pink poodle"
+            ).placeholder == "[genmoji: pink poodle]")
+        #expect(
+            placeholder("text/x-vlocation", "public.vlocation", "Dropped Pin.loc.vcf")
+                == "[location]")
+        #expect(placeholder(nil, nil, "Dropped Pin.loc.vcf") == "[location]")
+        #expect(
+            placeholder("audio/mp4", "public.mpeg-4-audio", "New Recording 12.m4a") == "[audio]")
+        #expect(placeholder(nil, "public.mpeg-4-audio") == "[audio]")
+        #expect(placeholder(nil, "public.mpeg-4") == "[video]")
+    }
+
+    @Test func placeholderTrimRemovesNewTokens() {
+        #expect(Transcript.stripPlaceholders("pin [location] and [sticker]") == "pin and")
+    }
 }

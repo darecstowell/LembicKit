@@ -30,10 +30,14 @@ public enum Transcript {
     public struct GroupRenderInfo: Sendable, Equatable {
         public let name: String
         public let participantLabels: [String]
+        /// People who wrote or were named in an event but are no longer members.
+        /// The header lists them after the members, as "Carla (left)".
+        public let formerLabels: [String]
 
-        public init(name: String, participantLabels: [String]) {
+        public init(name: String, participantLabels: [String], formerLabels: [String] = []) {
             self.name = name
             self.participantLabels = participantLabels
+            self.formerLabels = formerLabels
         }
     }
 
@@ -89,21 +93,202 @@ public enum Transcript {
     /// markers from `AttachmentInfo.placeholder` plus the FindMy `[shared
     /// location]` fallback (`Extractor.renderText`). Kept here because stripping
     /// is a render-layer concern; keep in lockstep if a new marker is added.
+    /// Genmoji (`[genmoji: …]`) is stripped by prefix; a voice note's words
+    /// (`[audio: "…"]`) are content and stay.
     static let placeholderTokens = [
         "[photo]", "[video]", "[gif]", "[audio]", "[pdf]",
-        "[contact]", "[attachment]", "[shared location]",
+        "[contact]", "[attachment]", "[shared location]", "[sticker]", "[location]",
     ]
 
     /// Remove placeholder tokens from one already-rendered message body. Caller
     /// gates on `hadAttachment`, so a literally-typed "[pdf]" in a message with
     /// no real attachment is left alone (rare edge, acceptable for a trim).
     static func stripPlaceholders(_ s: String) -> String {
-        var out = s
+        let source = s as NSString
+        return applyReplacements(to: source, placeholderStripSubstitutions(source))
+    }
+
+    /// The placeholder strip as substitutions in SOURCE offsets, so it composes with
+    /// redaction spans and the `OffsetMap` instead of shifting them.
+    static func placeholderStripSubstitutions(_ source: NSString) -> [BodySubstitution] {
+        let length = source.length
+        guard length > 0 else { return [] }
+        var isToken = [Bool](repeating: false, count: length)
         for token in placeholderTokens {
-            out = out.replacingOccurrences(of: token, with: " ")
+            var search = NSRange(location: 0, length: length)
+            while search.length > 0 {
+                let found = source.range(of: token, options: .literal, range: search)
+                if found.location == NSNotFound { break }
+                for k in found.location..<(found.location + found.length) { isToken[k] = true }
+                let next = found.location + found.length
+                search = NSRange(location: next, length: length - next)
+            }
         }
-        return Extractor.collapseSpaceRuns(out)
-            .trimmingCharacters(in: Extractor.pythonWhitespace)
+        var search = NSRange(location: 0, length: length)
+        while search.length > 0 {
+            let found = source.range(
+                of: #"\[genmoji: [^\]]*\]"#, options: .regularExpression, range: search)
+            if found.location == NSNotFound { break }
+            for k in found.location..<(found.location + found.length) { isToken[k] = true }
+            let next = found.location + found.length
+            search = NSRange(location: next, length: length - next)
+        }
+        func isSpace(_ k: Int) -> Bool {
+            let c = source.character(at: k)
+            return c == 0x20 || c == 0x09
+        }
+        func isEdge(_ k: Int) -> Bool {
+            if isToken[k] { return true }
+            guard let scalar = Unicode.Scalar(source.character(at: k)) else { return false }
+            return Extractor.pythonWhitespace.contains(scalar)
+        }
+        var head = 0
+        while head < length, isEdge(head) { head += 1 }
+        guard head < length else {
+            return [BodySubstitution(range: 0..<length, token: "", isRedaction: false)]
+        }
+        var tail = length
+        while tail > head, isEdge(tail - 1) { tail -= 1 }
+        var out: [BodySubstitution] = []
+        if head > 0 { out.append(BodySubstitution(range: 0..<head, token: "", isRedaction: false)) }
+        var k = head
+        while k < tail {
+            guard isToken[k] || isSpace(k) else {
+                k += 1
+                continue
+            }
+            var end = k
+            while end < tail, isToken[end] || isSpace(end) { end += 1 }
+            if !(end - k == 1 && source.character(at: k) == 0x20) {
+                out.append(BodySubstitution(range: k..<end, token: " ", isRedaction: false))
+            }
+            k = end
+        }
+        if tail < length {
+            out.append(BodySubstitution(range: tail..<length, token: "", isRedaction: false))
+        }
+        return out
+    }
+
+    /// The legend entries, in a fixed order, for the placeholder kinds that occur
+    /// in `bodies`. A voice note with words counts as `[audio]`.
+    static func legendTokens(in bodies: [String]) -> [String] {
+        let kinds: [(token: String, matches: [String])] = [
+            ("[photo]", ["[photo]"]), ("[video]", ["[video]"]), ("[gif]", ["[gif]"]),
+            ("[audio]", ["[audio]", "[audio: \""]), ("[pdf]", ["[pdf]"]),
+            ("[contact]", ["[contact]"]), ("[location]", ["[location]"]),
+            ("[shared location]", ["[shared location]"]), ("[sticker]", ["[sticker]"]),
+            ("[genmoji: …]", ["[genmoji: "]), ("[attachment]", ["[attachment]"]),
+        ]
+        var found = Set<String>()
+        for body in bodies where body.utf8.contains(0x5B) {
+            for kind in kinds where !found.contains(kind.token) {
+                if kind.matches.contains(where: body.contains) { found.insert(kind.token) }
+            }
+        }
+        return kinds.map(\.token).filter(found.contains)
+    }
+
+    /// The local date and time strings the renderer prints, without a
+    /// DateFormatter call per message. Dates with a fractional second or outside years 1000 to 9999 use a
+    /// DateFormatter, so the output is always the formatter's.
+    final class LocalClock {
+        private let timeZone: TimeZone
+        private var offset = 0
+        private var dayNumber = Int.min
+        private var dayText = ""
+        private lazy var formatters = (
+            day: Transcript.formatter("yyyy-MM-dd", timeZone: timeZone),
+            weekday: Transcript.formatter("EEE", timeZone: timeZone),
+            time: Transcript.formatter("HH:mm", timeZone: timeZone),
+            stamp: Transcript.formatter("yyyy-MM-dd'T'HH:mm:ssxxx", timeZone: timeZone)
+        )
+        private static let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        private static let twoDigits = (0..<100).map { $0 < 10 ? "0\($0)" : "\($0)" }
+
+        init(timeZone: TimeZone) { self.timeZone = timeZone }
+
+        /// Local seconds since 1970, or nil when the fast path does not apply.
+        private func localSeconds(_ date: Date) -> Int? {
+            let t = date.timeIntervalSince1970
+            guard t == t.rounded(.down), t > -30_000_000_000, t < 250_000_000_000 else {
+                return nil
+            }
+            offset = timeZone.secondsFromGMT(for: date)
+            return Int(t) + offset
+        }
+
+        private func days(_ seconds: Int) -> Int {
+            seconds >= 0 ? seconds / 86_400 : (seconds - 86_399) / 86_400
+        }
+
+        func day(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else { return formatters.day.string(from: date) }
+            let number = days(seconds)
+            if number != dayNumber {
+                // Days since 1970 to a Gregorian date (H. Hinnant, civil_from_days).
+                let z = number + 719_468
+                let era = (z >= 0 ? z : z - 146_096) / 146_097
+                let doe = z - era * 146_097
+                let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+                let mp = (5 * doy + 2) / 153
+                let d = doy - (153 * mp + 2) / 5 + 1
+                let m = mp < 10 ? mp + 3 : mp - 9
+                let y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+                guard (1000...9999).contains(y) else { return formatters.day.string(from: date) }
+                dayNumber = number
+                dayText = "\(y)-\(Self.twoDigits[m])-\(Self.twoDigits[d])"
+            }
+            return dayText
+        }
+
+        func weekday(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else {
+                return formatters.weekday.string(from: date)
+            }
+            return Self.weekdays[((days(seconds) + 4) % 7 + 7) % 7]
+        }
+
+        func time(_ date: Date) -> String {
+            guard let seconds = localSeconds(date) else {
+                return formatters.time.string(from: date)
+            }
+            let s = seconds - days(seconds) * 86_400
+            return "\(Self.twoDigits[s / 3600]):\(Self.twoDigits[s % 3600 / 60])"
+        }
+
+        /// ISO 8601 with the UTC offset, as `yyyy-MM-dd'T'HH:mm:ssxxx`.
+        func stamp(_ date: Date) -> String {
+            guard let seconds = localSeconds(date), !day(date).isEmpty, dayNumber == days(seconds)
+            else { return formatters.stamp.string(from: date) }
+            let s = seconds - days(seconds) * 86_400
+            let sign = offset < 0 ? "-" : "+"
+            let off = abs(offset)
+            return "\(dayText)T\(Self.twoDigits[s / 3600]):\(Self.twoDigits[s % 3600 / 60]):"
+                + "\(Self.twoDigits[s % 60])\(sign)\(Self.twoDigits[off / 3600]):"
+                + Self.twoDigits[off % 3600 / 60]
+        }
+    }
+
+    /// Each DST fall-back hour between two dates: the instants whose local clock
+    /// time happens twice.
+    static func repeatedHours(from start: Date, to end: Date, in timeZone: TimeZone)
+        -> [Range<Date>]
+    {
+        var windows: [Range<Date>] = []
+        var cursor = start.addingTimeInterval(-86_400)
+        while let change = timeZone.nextDaylightSavingTimeTransition(after: cursor),
+            change <= end.addingTimeInterval(86_400)
+        {
+            let before = timeZone.secondsFromGMT(for: change.addingTimeInterval(-1))
+            let shift = TimeInterval(before - timeZone.secondsFromGMT(for: change))
+            if shift > 0 {
+                windows.append(change.addingTimeInterval(-shift)..<change.addingTimeInterval(shift))
+            }
+            cursor = change
+        }
+        return windows
     }
 
     static func formatter(_ format: String, timeZone: TimeZone = .current) -> DateFormatter {
@@ -146,13 +331,17 @@ public enum Transcript {
     /// `.jsonl` speaker labels can never diverge. The mapping itself is never
     /// written into the output, so an assistant can't tell which Person is the
     /// user — which is the point.
-    static func anonymizationMap(for records: [MessageRecord]) -> [String: String] {
+    static func anonymizationMap(
+        for records: [MessageRecord], knownNames: [String: [String]] = [:]
+    ) -> [String: String] {
         var seen: [String] = []
         func note(_ label: String) { if !seen.contains(label) { seen.append(label) } }
         for r in records {
             note(r.speaker)
             for reaction in r.reactions { note(reaction.by) }
         }
+        // Labels the caller names but that never spoke (a quiet group member).
+        for label in knownNames.keys.sorted() { note(label) }
         // Float the owner to the front (stable order for everyone else).
         let ordered = seen.filter { $0 == meLabel } + seen.filter { $0 != meLabel }
         var map: [String: String] = [:]
@@ -258,7 +447,7 @@ public enum Transcript {
         guard guid != nil else { return text }
         let source = text as NSString
         let reps = bodyReplacements(
-            source: source, guid: guid, redactions: redactions, aliases: [:])
+            source: source, guid: guid, redactions: redactions, names: nil)
         return applyReplacements(to: source, reps)
     }
 
@@ -275,54 +464,6 @@ public enum Transcript {
         let range: Range<Int>
         let token: String
         let isRedaction: Bool
-    }
-
-    /// The in-body name-alias substitutions for one message under `anonymize`:
-    /// every whole-word, case-insensitive mention of a known participant NAME,
-    /// mapped to that participant's stable `PN` alias (so "tell Sarah hi" →
-    /// "tell P2 hi"). Empty when not anonymizing or when the body mentions no
-    /// participant. Reuses the SAME `aliases` map the speaker relabeling uses, so
-    /// the in-body alias and the speaker prefix always agree.
-    ///
-    /// Only real NAMES are aliased: the owner label `"Me"`, the generic `"Them"`,
-    /// and any label that is a formatted phone number (all digits / punctuation /
-    /// whitespace, no letter) are skipped — those are not names worth pseudonymizing
-    /// in the body, and `"Them"` would over-match the common English word. NO NER /
-    /// no third-party-name detection — exact-match against the known participant
-    /// labels only.
-    static func nameAliasReplacements(
-        in body: NSString, aliases: [String: String]
-    ) -> [BodySubstitution] {
-        guard !aliases.isEmpty, body.length > 0 else { return [] }
-        var out: [BodySubstitution] = []
-        // Stable order (longest label first) so a label that is a substring of a
-        // longer one can't pre-empt the longer match; ties broken by the label so
-        // the scan is deterministic.
-        let labels = aliases.keys
-            .filter { isAliasableName($0) }
-            .sorted { $0.count != $1.count ? $0.count > $1.count : $0 < $1 }
-        let whole = NSRange(location: 0, length: body.length)
-        for label in labels {
-            guard let alias = aliases[label] else { continue }
-            // Whole-word, case-insensitive literal match on the label. `\Q…\E`
-            // quotes the label so any regex metacharacters in a name are literal.
-            let pattern = #"(?i)\b\#(NSRegularExpression.escapedPattern(for: label))\b"#
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            regex.enumerateMatches(in: body as String, range: whole) { match, _, _ in
-                guard let match, match.range.length > 0, let range = Range(match.range)
-                else { return }
-                out.append(BodySubstitution(range: range, token: alias, isRedaction: false))
-            }
-        }
-        return out
-    }
-
-    /// True when a participant label is a real, aliasable NAME: not the owner
-    /// label `"Me"`, not the generic `"Them"`, and not a formatted phone number
-    /// (a label with no letter — all digits / punctuation / whitespace).
-    static func isAliasableName(_ label: String) -> Bool {
-        if label == meLabel || label == "Them" { return false }
-        return label.contains { $0.isLetter }
     }
 
     /// Two half-open ranges intersect.
@@ -381,12 +522,19 @@ public enum Transcript {
     public static func redactedText(
         of record: MessageRecord, redactions: RedactionSet
     ) -> String? {
-        if let guid = record.guid,
-            redactions.redactions(forGuid: guid).contains(where: { $0.range == nil })
-        {
-            return nil
-        }
+        if coversWholeMessage(record, redactions: redactions) { return nil }
         return applySpanRedactions(to: record.text, guid: record.guid, redactions: redactions)
+    }
+
+    /// True when a redaction hides the whole message: a nil range, a span over the
+    /// whole text, or a span past the end of the text (a stale anchor never fails open).
+    static func coversWholeMessage(_ record: MessageRecord, redactions: RedactionSet) -> Bool {
+        guard let guid = record.guid else { return false }
+        let len = (record.text as NSString).length
+        return redactions.redactions(forGuid: guid).contains { r in
+            guard let range = r.range else { return true }
+            return range == 0..<len || range.lowerBound < 0 || range.upperBound > len
+        }
     }
 
     /// The unified, ascending, non-overlapping `[BodySubstitution]` list for ONE
@@ -402,7 +550,8 @@ public enum Transcript {
     /// `source` is the message body as an `NSString` (UTF-16 offsets); `guid` is
     /// nil-safe (a nil-guid message has no redactions, only aliases can apply).
     static func bodyReplacements(
-        source: NSString, guid: String?, redactions: RedactionSet, aliases: [String: String]
+        source: NSString, guid: String?, redactions: RedactionSet, names: NameMatcher?,
+        stripPlaceholders: Bool = false
     ) -> [BodySubstitution] {
         let sourceLen = source.length
 
@@ -417,31 +566,42 @@ public enum Transcript {
                     $0.lowerBound >= 0 && $0.upperBound <= sourceLen
                         && $0.lowerBound < $0.upperBound
                 }
-                .sorted { $0.lowerBound < $1.lowerBound }
-            for sp in clamped {
-                if let last = redactionReps.last, sp.lowerBound <= last.range.upperBound {
-                    let merged =
-                        last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
-                    redactionReps[redactionReps.count - 1] = BodySubstitution(
-                        range: merged, token: "[redacted]", isRedaction: true)
-                } else {
-                    redactionReps.append(
-                        BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
-                }
-            }
+            redactionReps = mergedRedactionSubstitutions(clamped)
         }
 
         // (b) In-body name-alias replacements (anonymize only; empty otherwise).
         // On overlap with a redaction span the REDACTION wins — the value already
         // reads `[redacted]`.
-        let aliasReps = Self.nameAliasReplacements(in: source, aliases: aliases)
+        let aliasReps = (names?.substitutions(in: source) ?? [])
             .filter { a in
                 !redactionReps.contains { r in rangesOverlap(a.range, r.range) }
             }
 
+        // A strip that touches a redaction is dropped: the redaction already hides it.
+        let stripReps =
+            stripPlaceholders
+            ? placeholderStripSubstitutions(source).filter { s in
+                !redactionReps.contains { r in rangesOverlap(s.range, r.range) }
+            } : []
+
         // (c) Unified, non-overlapping, ascending list. Redactions are placed first
         // so an alias that ties a redaction start is dropped.
-        return dedupedReplacements(redactionReps + aliasReps)
+        return dedupedReplacements(redactionReps + stripReps + aliasReps)
+    }
+
+    /// Overlapping or touching spans merged into one `[redacted]` substitution each.
+    static func mergedRedactionSubstitutions(_ spans: [Range<Int>]) -> [BodySubstitution] {
+        var out: [BodySubstitution] = []
+        for sp in spans.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = out.last, sp.lowerBound <= last.range.upperBound {
+                let merged = last.range.lowerBound..<Swift.max(last.range.upperBound, sp.upperBound)
+                out[out.count - 1] = BodySubstitution(
+                    range: merged, token: "[redacted]", isRedaction: true)
+            } else {
+                out.append(BodySubstitution(range: sp, token: "[redacted]", isRedaction: true))
+            }
+        }
+        return out
     }
 
     /// The fully-rendered body for ONE message — redaction spans spliced to
@@ -463,16 +623,23 @@ public enum Transcript {
     public static func renderedBody(
         of record: MessageRecord, redactions: RedactionSet, aliases: [String: String]
     ) -> String? {
-        if let guid = record.guid {
-            let rs = redactions.redactions(forGuid: guid)
-            let len = (record.text as NSString).length
-            // Whole-message redaction (explicit nil-range OR a span covering the
-            // whole text) → omit the row (no inline splice).
-            if rs.contains(where: { $0.range == nil || $0.range == 0..<len }) { return nil }
-        }
+        renderedBody(
+            of: record, redactions: redactions,
+            names: aliases.isEmpty ? nil : NameMatcher(aliases: aliases), stripPlaceholders: false)
+    }
+
+    /// `renderedBody` with a prebuilt name matcher and the optional placeholder strip,
+    /// both applied in source offsets.
+    static func renderedBody(
+        of record: MessageRecord, redactions: RedactionSet, names: NameMatcher?,
+        stripPlaceholders: Bool
+    ) -> String? {
+        // Whole-message redaction → omit the row (no inline splice).
+        if coversWholeMessage(record, redactions: redactions) { return nil }
         let source = record.text as NSString
         let reps = bodyReplacements(
-            source: source, guid: record.guid, redactions: redactions, aliases: aliases)
+            source: source, guid: record.guid, redactions: redactions, names: names,
+            stripPlaceholders: stripPlaceholders)
         return applyReplacements(to: source, reps)
     }
 
@@ -482,16 +649,17 @@ public enum Transcript {
         anonymize: Bool = false,
         group: GroupRenderInfo? = nil,
         systemEvents: [SystemEvent] = [],
-        timeZone: TimeZone = .current
+        knownNames: [String: [String]] = [:],
+        timeZone: TimeZone = .current,
+        noteToSelf: Bool = false
     ) -> RenderResult {
-        let day = formatter("yyyy-MM-dd", timeZone: timeZone)
-        let weekday = formatter("EEE", timeZone: timeZone)
-        let time = formatter("HH:mm", timeZone: timeZone)
+        let local = LocalClock(timeZone: timeZone)
 
         // Speaker → "Person N" map when de-biasing; empty otherwise (alias lookups
         // fall through to the real label). Built from the raw records so the .txt
         // and .jsonl maps are identical (same input set).
-        let aliases = anonymize ? anonymizationMap(for: records) : [:]
+        let aliases = anonymize ? anonymizationMap(for: records, knownNames: knownNames) : [:]
+        let names = anonymize ? NameMatcher(aliases: aliases, knownNames: knownNames) : nil
         func alias(_ speaker: String) -> String { aliases[speaker] ?? speaker }
 
         // Group detected secrets by guid for O(1) lookup per message.
@@ -503,7 +671,8 @@ public enum Transcript {
         struct Emit {
             let date: Date
             let speaker: String
-            let text: String  // body BEFORE redaction transforms (post attach-trim)
+            let text: String  // source body; trim and redaction both splice in source offsets
+            let stripPlaceholders: Bool
             let reactions: [Reaction]
             let hadAttachment: Bool
             let guid: String?
@@ -512,31 +681,17 @@ public enum Transcript {
         var emit: [Emit] = []
         emit.reserveCapacity(records.count)
         for r in records {
-            var text = r.text
-            if trim.dropAttachmentPlaceholders, r.hadAttachment {
-                text = stripPlaceholders(text)
-                if text.isEmpty { continue }
-            }
-            // Whole-message redaction? Either an explicit nil-range redaction, or
-            // a span that covers the entire (pre-trim) text. nil-guid records can
-            // never be redacted.
+            let strip = trim.dropAttachmentPlaceholders && r.hadAttachment
+            if strip, stripPlaceholders(r.text).isEmpty { continue }
+            // Whole-message redaction? A nil range, a span over the entire source
+            // text, or a stale span past its end. nil-guid records are never redacted.
             var whole: Redaction?
-            if let guid = r.guid {
-                let rs = redactions.redactions(forGuid: guid)
-                if rs.contains(where: { $0.range == nil }) {
-                    whole = Redaction(guid: guid, range: nil)
-                } else {
-                    // A span that covers the entire (pre-trim) text is a whole-
-                    // message redaction in disguise; normalize it to a tombstone.
-                    let len = (r.text as NSString).length
-                    if rs.contains(where: { $0.range == 0..<len }) {
-                        whole = Redaction(guid: guid, range: nil)
-                    }
-                }
+            if let guid = r.guid, coversWholeMessage(r, redactions: redactions) {
+                whole = Redaction(guid: guid, range: nil)
             }
             emit.append(
                 Emit(
-                    date: r.date, speaker: r.speaker, text: text,
+                    date: r.date, speaker: r.speaker, text: r.text, stripPlaceholders: strip,
                     reactions: trim.dropReactions ? [] : r.reactions,
                     hadAttachment: r.hadAttachment, guid: r.guid, whole: whole))
         }
@@ -557,10 +712,12 @@ public enum Transcript {
         // Anonymizing scrubs the counterparty's number/name from the header — the
         // whole point is to hide who the thread is with.
         if let group, renderGroup {
-            out += "# iMessage group transcript: \"\(group.name)\"\n"
+            out += "# Messages group transcript: \"\(group.name)\"\n"
+        } else if noteToSelf, !anonymize {
+            out += "# Messages transcript: notes to self\n"
         } else {
             out +=
-                anonymize ? "# iMessage transcript\n" : "# iMessage transcript with \(number)\n"
+                anonymize ? "# Messages transcript\n" : "# Messages transcript with \(number)\n"
         }
         if let first = emit.first, let last = emit.last {
             var parts = ["\(comma(messages)) messages"]
@@ -569,13 +726,15 @@ public enum Transcript {
                 parts.append("\(comma(withAttachments)) with attachments")
             }
             out +=
-                "# \(day.string(from: first.date)) → \(day.string(from: last.date)) · "
+                "# \(local.day(first.date)) → \(local.day(last.date)) · "
                 + parts.joined(separator: " · ") + "\n"
         }
         if let group, renderGroup {
             // The full roster: "Me = the account owner" plus every member's label
             // (incl. any who never spoke), so an assistant can attribute every line.
-            let roster = (["Me = the account owner"] + group.participantLabels)
+            let roster =
+                (["Me = the account owner"] + group.participantLabels
+                + group.formerLabels.map { "\($0) (left)" })
                 .joined(separator: " · ")
             out += "# Participants: \(roster)\n"
         } else if anonymize {
@@ -584,6 +743,8 @@ public enum Transcript {
             let people = (1...Swift.max(aliases.count, 1)).map { "Person \($0) (P\($0))" }
                 .joined(separator: ", ")
             out += "# Speakers: \(people) — names anonymized.\n"
+        } else if noteToSelf {
+            out += "# Speakers: Me = the account owner\n"
         } else {
             out += "# Speakers: Me = the account owner, Them = \(number)\n"
         }
@@ -594,16 +755,18 @@ public enum Transcript {
             if let group, renderGroup {
                 reactor = group.participantLabels.first ?? "a member"
             } else {
-                reactor = anonymize ? "PN" : "Them"
+                reactor = anonymize ? "PN" : noteToSelf ? "Me" : "Them"
             }
             out += "# Reactions shown as [\(reactor): ❤️] after the message they target.\n"
         }
-        if !trim.dropAttachmentPlaceholders {
+        let shown = legendTokens(in: emit.map(\.text))
+        if !trim.dropAttachmentPlaceholders, !shown.isEmpty {
             out +=
-                "# Attachments shown as typed placeholders: [photo] [video] [gif] "
-                + "[audio] [pdf] [contact] [shared location].\n"
+                "# Attachments shown as typed placeholders: "
+                + shown.joined(separator: " ") + ".\n"
         }
-        out += "# Times are local, 24h. Section headers are calendar days.\n\n"
+        let zoneName = anonymize ? "" : " (\(timeZone.identifier))"
+        out += "# Times are local\(zoneName), 24h. Section headers are calendar days.\n\n"
 
         // ---- Phase 2: emit day-grouped body, applying redactions + collecting marks.
         var spans: [RenderSpan] = []
@@ -622,14 +785,28 @@ public enum Transcript {
         // pass scrubs. Sorted so the merge with the message stream is stable.
         let pendingEvents = (renderGroup ? systemEvents : []).sorted { $0.date < $1.date }
         var eventIndex = 0
+        // A clock time inside a DST fall-back hour happens twice, so it names its zone.
+        let dates = [
+            emit.first?.date, emit.last?.date, pendingEvents.first?.date,
+            pendingEvents.last?.date,
+        ].compactMap { $0 }
+        let repeated =
+            dates.min().map {
+                repeatedHours(from: $0, to: dates.max() ?? $0, in: timeZone)
+            } ?? []
+        let zone = formatter("HH:mm zzz", timeZone: timeZone)
+        func clock(_ date: Date) -> String {
+            repeated.contains { $0.contains(date) }
+                ? zone.string(from: date) : local.time(date)
+        }
         // Open the day section for `date` if it isn't the current one — shared by
         // the message loop and the event flush so an event that starts a new day
         // gets its own `## YYYY-MM-DD` header.
         func openDaySection(for date: Date) {
-            let d = day.string(from: date)
+            let d = local.day(date)
             if d != currentDay {
                 currentDay = d
-                acc.append("\n## \(d) (\(weekday.string(from: date)))\n")
+                acc.append("\n## \(d) (\(local.weekday(date)))\n")
             }
         }
         // Emit every pending event at or before `boundary` (nil ⇒ drain all),
@@ -641,7 +818,7 @@ public enum Transcript {
                 let ev = pendingEvents[eventIndex]
                 if let boundary, ev.date > boundary { break }
                 openDaySection(for: ev.date)
-                acc.append("\(time.string(from: ev.date)) — \(ev.line)\n")
+                acc.append("\(clock(ev.date)) — \(ev.line)\n")
                 eventIndex += 1
             }
         }
@@ -659,7 +836,7 @@ public enum Transcript {
                 var j = i
                 while j < emit.count,
                     emit[j].whole != nil,
-                    day.string(from: emit[j].date) == currentDay
+                    local.day(emit[j].date) == currentDay
                 {
                     j += 1
                 }
@@ -695,7 +872,8 @@ public enum Transcript {
             // splice here is byte-identical to what `renderedBody` (the `.jsonl` +
             // downstream-formatter path) produces.
             let allReps = Self.bodyReplacements(
-                source: sourceNS, guid: guid, redactions: redactions, aliases: aliases)
+                source: sourceNS, guid: guid, redactions: redactions, names: names,
+                stripPlaceholders: r.stripPlaceholders)
 
             // Build the transformed body (pre-indentation) by splicing every
             // replacement; with no replacements this returns `r.text` unchanged
@@ -703,8 +881,10 @@ public enum Transcript {
             let transformedBody = Self.applyReplacements(to: sourceNS, allReps)
 
             // Indentation transform on the body (newline → newline+8sp).
-            let indented = transformedBody.replacingOccurrences(
-                of: "\n", with: "\n        ")
+            let indented =
+                transformedBody.contains("\n")
+                ? transformedBody.replacingOccurrences(of: "\n", with: "\n        ")
+                : transformedBody
             let indentedNS = indented as NSString
 
             // Offset map covering BOTH transforms (the unified replacement collapse
@@ -723,7 +903,7 @@ public enum Transcript {
             // Append the line, recording the body's output range. `bodyStart` is
             // measured AFTER the (possibly anonymized) prefix, so redaction /
             // highlight output ranges stay correct regardless of label length.
-            let prefix = "\(time.string(from: r.date)) \(alias(r.speaker)): "
+            let prefix = "\(clock(r.date)) \(alias(r.speaker)): "
             acc.append(prefix)
             let bodyStart = acc.length
             acc.append(indented)
@@ -805,26 +985,30 @@ public enum Transcript {
     public static func jsonLines(
         records: [MessageRecord], redactions: RedactionSet = RedactionSet(),
         anonymize: Bool = false,
+        knownNames: [String: [String]] = [:],
         timeZone: TimeZone = .current
     ) -> String {
-        let full = formatter("yyyy-MM-dd HH:mm:ss", timeZone: timeZone)
+        let local = LocalClock(timeZone: timeZone)
         // Same speaker → "Person N" map the .txt path uses, so the two outputs
         // label identically. Empty when not anonymizing (lookups fall through).
-        let aliases = anonymize ? anonymizationMap(for: records) : [:]
+        let aliases = anonymize ? anonymizationMap(for: records, knownNames: knownNames) : [:]
+        let names = anonymize ? NameMatcher(aliases: aliases, knownNames: knownNames) : nil
         var out = ""
         for r in records {
             // Whole-message redaction → omit the object (no jsonl tombstone).
             // `renderedBody` returns nil for it; nil-guid records can never be
             // whole-redacted, so they always render. The body is the SAME unified
             // splice (redactions + in-body aliases) the `.txt` path shows.
-            guard let body = Self.renderedBody(of: r, redactions: redactions, aliases: aliases)
+            guard
+                let body = Self.renderedBody(
+                    of: r, redactions: redactions, names: names, stripPlaceholders: false)
             else { continue }
             var fields: [(String, String)] = [
-                ("d", jsonString(full.string(from: r.date))),
+                ("d", jsonString(local.stamp(r.date))),
                 ("s", jsonString(aliases[r.speaker] ?? r.speaker)),
                 ("m", jsonString(body)),
             ]
-            if let svc = r.service, svc != "iMessage" {
+            if let svc = r.service.flatMap(serviceLabel) {
                 fields.append(("svc", jsonString(svc)))
             }
             if !r.reactions.isEmpty {
@@ -838,6 +1022,15 @@ public enum Transcript {
             out += "{" + fields.map { "\"\($0.0)\": \($0.1)" }.joined(separator: ", ") + "}\n"
         }
         return out
+    }
+
+    /// A plain label for `message.service`, or nil for iMessage (the default).
+    static func serviceLabel(_ service: String) -> String? {
+        switch service {
+        case "iMessage", "": nil
+        case "iMessageLite": "iMessage via satellite"
+        default: service
+        }
     }
 
     /// JSON string literal matching Python json.dumps(ensure_ascii=False):

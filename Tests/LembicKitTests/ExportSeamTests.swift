@@ -22,7 +22,7 @@ struct ExportSeamTests {
         #expect(both.txt != nil, "txt produced when requested")
         #expect(both.jsonl != nil, "jsonl produced when requested")
         #expect(
-            both.txt?.contains("# iMessage transcript with +1") ?? false,
+            both.txt?.contains("# Messages transcript with +1") ?? false,
             "txt has the daily-grouped header")
         #expect(
             both.jsonl?.split(separator: "\n").count == 3,
@@ -86,7 +86,7 @@ struct ExportSeamTests {
             records: recs, number: "+1", formats: [.txt],
             scope: .init(dateRange: mid...mid))
         #expect(scoped.messageCount == 1, "date range filters to the in-range set")
-        #expect(scoped.records.map(\.guid) == ["g1"], "scope keeps exactly the in-range record")
+        #expect(scoped.unredactedRecords.map(\.guid) == ["g1"], "scope keeps exactly the in-range record")
     }
 
     @Test func emptyScopeContract() {

@@ -43,7 +43,7 @@ If you want a library to build on, or you want to read exactly what happens to y
 You give it a chat and it writes two files. The `.txt` is grouped by calendar day and made to read well in a chat window:
 
 ```
-# iMessage transcript with +15035550146
+# Messages transcript with +15035550146
 # 2026-05-27 → 2026-06-13 · 70 messages · 2 reactions · 5 with attachments
 # Speakers: Me = the account owner, Them = +15035550146
 
@@ -58,7 +58,7 @@ You give it a chat and it writes two files. The `.txt` is grouped by calendar da
 The `.jsonl` is one message per line, for code that reads the thread programmatically:
 
 ```
-{"d": "2026-05-27 05:54:35", "s": "Them", "m": "Materials came in early, ahead of schedule", "svc": "SMS"}
+{"d": "2026-05-27T05:54:35-05:00", "s": "Them", "m": "Materials came in early, ahead of schedule", "svc": "SMS"}
 ```
 
 Attachments become short markers like `[photo]`, and dates and reactions are preserved, so a model gets the structure of the conversation without the byte cost of a PDF or the noise of raw CSV.
