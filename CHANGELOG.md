@@ -22,6 +22,10 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   reads Contacts once and passes the names to `Export(database:contacts:)` (new
   optional `contacts:` on both `Export` initializers). `--sample --contacts` now
   reads Contacts too (a TCC prompt is possible) and prints resolved names.
+- With a scrubber on, the prepared-record APIs number `Member N` and the
+  anonymize aliases as the `.txt` does when they get the group roster. Before,
+  a group member who never wrote could shift the numbers, so the PDF, DOCX,
+  CSV, and XLSX of one export could disagree with the `.txt`.
 
 ### Security
 
@@ -39,6 +43,12 @@ LembicKit is pre-1.0, so minor versions can still carry breaking API changes.
   and render inputs, or from records, a `Conversation`, and its labels.
   `cancel()` stops a pass in progress; later renders throw `CancellationError`.
 - `Transcript.RenderResult.empty`, the result of an empty scope.
+- `Export.preparedRedactedRecords(_:conversation:labels:scope:redactions:)` and
+  `Export.unredactedPreparedRecords(_:conversation:labels:scope:)` prepare
+  records as the instance `render(_:)` does: the group roster and
+  `Export.knownNames(for:labels:)` are added for the caller. The
+  `group:` overloads of both take the roster alone. The old signatures still
+  work and pass no roster.
 
 ## [0.4.0] - 2026-10-14
 
